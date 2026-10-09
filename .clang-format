@@ -36,7 +36,7 @@ BinPackArguments: false
 BinPackParameters: false
 AllowAllArgumentsOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
-AlignAfterOpenBracket: AlwaysBreak
+AlignAfterOpenBracket: BlockIndent
 BreakBeforeBinaryOperators: NonAssignment
 BreakBeforeTernaryOperators: true
 

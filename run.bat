@@ -1,4 +1,4 @@
 @echo off
 
 CALL .\build.bat
-.\build\handmade_win32.exe
+CALL .\build\handmade_win32.exe
