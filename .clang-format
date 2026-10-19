@@ -28,7 +28,7 @@ ReferenceAlignment: Pointer
 DerivePointerAlignment: false
 
 # Includes
-SortIncludes: CaseSensitive
+SortIncludes: Never
 IncludeBlocks: Regroup
 
 # Function declarations and calls
