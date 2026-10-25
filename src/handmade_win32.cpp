@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <windows.h>
 #include <xinput.h>
+#include <dsound.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -23,6 +24,7 @@ struct Win32OffscreenBuffer {
 
 static bool running;
 static Win32OffscreenBuffer global_backbuffer;
+static LPDIRECTSOUNDBUFFER global_sound_buffer;
 
 // constants
 const int k_bytes_per_pixel = 4;
@@ -48,12 +50,128 @@ X_INPUT_SET_STATE(xinput_set_state_stub) {
 static x_input_set_state* xinput_set_state_ = &xinput_set_state_stub;
 #define XInputSetState xinput_set_state_
 
+#define DIRECT_SOUND_CREATE(name) \
+    HRESULT WINAPI name(LPGUID pc_guid_device, LPDIRECTSOUND* pp_ds, LPUNKNOWN p_unk_outer)
+typedef DIRECT_SOUND_CREATE(_DirectSoundCreate);
+
 static void win32_load_xinput() {
-    HMODULE lib = LoadLibrary("xinput1_3.dll");
+    HMODULE lib = LoadLibrary("xinput1_4.dll");
+    if (!lib) {
+        lib = LoadLibrary("xinput1_3.dll");
+    }
+
     if (lib) {
         xinput_get_state_ = (x_input_get_state*)GetProcAddress(lib, "XInputGetState");
         xinput_set_state_ = (x_input_set_state*)GetProcAddress(lib, "XInputSetState");
     }
+}
+
+static void win32_init_dsound(HWND window, u32 samples_per_second, u32 buffer_size) {
+    HMODULE lib = LoadLibrary("dsound.dll");
+    if (lib) {
+        _DirectSoundCreate* direct_sound_create = (_DirectSoundCreate*)GetProcAddress(lib, "DirectSoundCreate");
+        LPDIRECTSOUND direct_sound;
+        if (!direct_sound_create || !SUCCEEDED(direct_sound_create(0, &direct_sound, 0))) {
+            OutputDebugString("[warn] error creating direct sound handle");
+            return;
+        }
+        if (!SUCCEEDED(direct_sound->SetCooperativeLevel(window, DSSCL_PRIORITY))) {
+            OutputDebugString("[warn] error setting dsound coop level");
+            return;
+        }
+
+        DSBUFFERDESC buffer_desc = {
+            .dwSize = sizeof(buffer_desc),
+            .dwFlags = DSBCAPS_PRIMARYBUFFER,
+        };
+        LPDIRECTSOUNDBUFFER sound_buffer;
+        if (!SUCCEEDED(direct_sound->CreateSoundBuffer(&buffer_desc, &sound_buffer, 0))) {
+            OutputDebugString("[warn] error setting dsound buffer");
+            return;
+        }
+
+        WAVEFORMATEX wave_fmt = {
+            .wFormatTag = WAVE_FORMAT_PCM,
+            .nChannels = 2,
+            .nSamplesPerSec = samples_per_second,
+            .wBitsPerSample = 16,
+            .cbSize = 0,
+        };
+        wave_fmt.nBlockAlign = (u16)((wave_fmt.nChannels * wave_fmt.wBitsPerSample) / 8);
+        wave_fmt.nAvgBytesPerSec = wave_fmt.nSamplesPerSec * wave_fmt.nBlockAlign;
+        if (!SUCCEEDED(sound_buffer->SetFormat(&wave_fmt))) {
+            OutputDebugString("[warn] error setting dsound format");
+            return;
+        }
+
+        DSBUFFERDESC sec_buffer_desc = {
+            .dwSize = sizeof(sec_buffer_desc),
+            .dwFlags = 0,
+            .dwBufferBytes = buffer_size,
+            .lpwfxFormat = &wave_fmt,
+        };
+        if (!SUCCEEDED(direct_sound->CreateSoundBuffer(&sec_buffer_desc, &global_sound_buffer, 0))) {
+            OutputDebugString("[warn] error creating secondary dsound buffer");
+            return;
+        }
+    }
+}
+
+static void fill_sound_buffer(
+    i16 volume,
+    int bytes_per_sample,
+    u32& running_sample_idx,
+    int half_square_wave_period,
+    int buffer_size
+) {
+    DWORD play_cursor;
+    DWORD write_cursor;
+    int error = global_sound_buffer->GetCurrentPosition(&play_cursor, &write_cursor);
+    if (!SUCCEEDED(error)) {
+        OutputDebugString("[warn] error getting sound buffer current position\n");
+        return;
+    }
+
+    DWORD byte_to_lock = running_sample_idx * bytes_per_sample % buffer_size;
+    DWORD bytes_to_write;
+    if (byte_to_lock == play_cursor) {
+        bytes_to_write = buffer_size;
+    } else if (byte_to_lock > play_cursor) {
+        bytes_to_write = buffer_size - byte_to_lock;
+        bytes_to_write += play_cursor;
+    } else {
+        bytes_to_write = play_cursor - byte_to_lock;
+    }
+
+    void* region1 = nullptr;
+    DWORD region1_size;
+    void* region2 = nullptr;
+    DWORD region2_size;
+    HRESULT _err =
+        global_sound_buffer->Lock(byte_to_lock, bytes_to_write, &region1, &region1_size, &region2, &region2_size, 0);
+    if (!SUCCEEDED(_err)) {
+        int code = HRESULT_CODE(_err);
+        OutputDebugString("[warn] error locking sound buffer\n");
+        return;
+    }
+
+    i16* sample_out = (i16*)region1;
+    DWORD region1_sample_count = region1_size / bytes_per_sample;
+    for (DWORD idx = 0; idx < region1_sample_count; idx++) {
+        i16 sample = ((running_sample_idx++ / half_square_wave_period) % 2) ? volume : -volume;
+        *sample_out++ = sample;
+        *sample_out++ = sample;
+    }
+
+    sample_out = (i16*)region2;
+    DWORD region2_sample_count = region2_size / bytes_per_sample;
+    for (DWORD idx = 0; idx < region2_sample_count; idx++) {
+        i16 sample = ((running_sample_idx++ / half_square_wave_period) % 2) ? volume : -volume;
+        *sample_out++ = sample;
+        *sample_out++ = sample;
+    }
+
+    global_sound_buffer->Unlock(region1, region1_size, region2, region2_size);
 }
 
 Win32WindowDim get_window_dim(HWND window) {
@@ -104,12 +222,16 @@ static void win32_resize_dib_section(Win32OffscreenBuffer* backbuffer, int w, in
     backbuffer->pitch = w * k_bytes_per_pixel;
 
     int bitmap_memory_size = w * h * k_bytes_per_pixel;
-    backbuffer->memory = VirtualAlloc(0, bitmap_memory_size, MEM_COMMIT, PAGE_READWRITE);
+    backbuffer->memory = VirtualAlloc(0, bitmap_memory_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     render_gradient(*backbuffer, 128, 0);
 }
 
-static void
-win32_display_window_buffer(HDC device_ctx, Win32OffscreenBuffer backbuffer, int window_width, int window_height) {
+static void win32_display_window_buffer(
+    HDC device_ctx,
+    Win32OffscreenBuffer backbuffer,
+    int window_width,
+    int window_height
+) {
     StretchDIBits(
         device_ctx,
         0,
@@ -179,6 +301,12 @@ LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPAR
         }
         if (vk_code == VK_SPACE) {
         }
+
+        bool alt_key_was_down = ((l_param >> 29) & 1) != 0;
+        if (vk_code == VK_F4 && alt_key_was_down) {
+            running = false;
+        }
+
         break;
     }
     default: {
@@ -219,6 +347,18 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
             int x_offset = 0;
             int y_offset = 0;
             win32_load_xinput();
+
+            int tone_hz = 256;
+            i16 tone_volume = 200;
+            int samples_per_second = 48000;
+            u32 running_sample_idx = 0;
+            int square_wave_period = samples_per_second / tone_hz;
+            int half_square_wave_period = square_wave_period / 2;
+            int bytes_per_sample = sizeof(i16) * 2;
+            int buffer_size = samples_per_second * bytes_per_sample;
+            win32_init_dsound(window_handle, samples_per_second, buffer_size);
+            bool sound_is_playing = false;
+
             while (running) {
                 MSG message;
                 while (PeekMessage(&message, 0, 0, 0, PM_REMOVE)) {
@@ -256,6 +396,18 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                 }
 
                 render_gradient(global_backbuffer, x_offset, y_offset);
+                fill_sound_buffer(
+                    tone_volume,
+                    bytes_per_sample,
+                    running_sample_idx,
+                    half_square_wave_period,
+                    buffer_size
+                );
+
+                if (!sound_is_playing) {
+                    global_sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
+                    sound_is_playing = !sound_is_playing;
+                }
 
                 HDC device_ctx = GetDC(window_handle);
                 Win32WindowDim window_dim = get_window_dim(window_handle);

@@ -1,4 +1,4 @@
-﻿BasedOnStyle: LLVM
+﻿BasedOnStyle: Google
 Language: Cpp
 
 # General
@@ -39,6 +39,9 @@ AllowAllParametersOfDeclarationOnNextLine: false
 AlignAfterOpenBracket: BlockIndent
 BreakBeforeBinaryOperators: NonAssignment
 BreakBeforeTernaryOperators: true
+AlwaysBreakAfterReturnType: None
+AlwaysBreakAfterDefinitionReturnType: None
+PenaltyReturnTypeOnItsOwnLine: 1000000000
 
 # Control flow
 SpaceBeforeParens: ControlStatements
