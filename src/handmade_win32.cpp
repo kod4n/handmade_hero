@@ -3,7 +3,9 @@
 #include <windows.h>
 #include <xinput.h>
 #include <xaudio2.h>
+#include <strsafe.h>
 #include <array>
+#include <cstdarg>
 #include <vector>
 
 typedef uint8_t u8;
@@ -46,6 +48,7 @@ struct Win32SoundOutput {
     f32 t_sine = 0.0f;
     u32 latency_sample_count = 0;
     bool started = false;
+    bool enabled = false;
 };
 
 struct Win32AudioBuffer {
@@ -142,6 +145,53 @@ static void win32_log_hresult(const char* op, HRESULT hr) {
     OutputDebugString(output);
 }
 
+enum class LogSeverity { Info, Warn, Error };
+
+static const char* log_severity(LogSeverity severity) {
+    const char* severity_str = "";
+
+    switch (severity) {
+    case LogSeverity::Info:
+        severity_str = "info";
+        break;
+    case LogSeverity::Warn:
+        severity_str = "warn";
+        break;
+    case LogSeverity::Error:
+        severity_str = "error";
+        break;
+    }
+
+    return severity_str;
+}
+
+static void win32_log(LogSeverity severity, const char* format, ...) {
+    char buffer[1024];
+    size_t prefix_length = 0;
+    auto severity_str = log_severity(severity);
+
+    HRESULT hr = StringCchPrintfA(buffer, ARRAYSIZE(buffer), "[%s] ", severity_str);
+    if (FAILED(hr)) {
+        win32_log_hresult("log formatting failed", hr);
+        return;
+    }
+
+    // Append the formatted message after the prefix.
+    prefix_length = strlen(buffer);
+
+    va_list args;
+    va_start(args, format);
+
+    hr = StringCchVPrintfA(buffer + prefix_length, ARRAYSIZE(buffer) - prefix_length, format, args);
+
+    va_end(args);
+    if (SUCCEEDED(hr)) {
+        OutputDebugString(buffer);
+    } else {
+        win32_log_hresult("debug message formatting failed", hr);
+    }
+}
+
 static bool win32_init_xaudio2(Win32SoundOutput& sound_output, u32 samples_per_second, u32 buffer_size) {
     sound_output.samples_per_second = samples_per_second;
     sound_output.bytes_per_sample = 2 * sizeof(i16);
@@ -233,7 +283,7 @@ static bool fill_sound_buffer(Win32SoundOutput& sound_output, u32 buffer_idx) {
 }
 
 static bool process_audio(Win32SoundOutput& sound_output) {
-    if (!global_audio.source_voice) {
+    if (!global_audio.source_voice || !sound_output.enabled) {
         return false;
     }
 
@@ -411,6 +461,10 @@ LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPAR
 }
 
 int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd_line, int n_cmd_show) {
+    LARGE_INTEGER perf_freq_res;
+    QueryPerformanceFrequency(&perf_freq_res);
+    i64 perf_freq = perf_freq_res.QuadPart;
+
     WNDCLASS window_class = {
         .style = CS_HREDRAW | CS_VREDRAW,
         .lpfnWndProc = window_callback,
@@ -446,6 +500,10 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                 OutputDebugString("[error] failed to init XAudio2\n");
                 running = false;
             }
+
+            u64 last_cycle_count = __rdtsc();
+            LARGE_INTEGER last_counter;
+            QueryPerformanceCounter(&last_counter);
 
             while (running) {
                 MSG message;
@@ -493,6 +551,22 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                 Win32WindowDim window_dim = get_window_dim(window_handle);
                 win32_display_window_buffer(device_ctx, global_backbuffer, window_dim.width, window_dim.height);
                 ReleaseDC(window_handle, device_ctx);
+
+                u64 end_cycle_count = __rdtsc();
+                LARGE_INTEGER end_counter;
+                QueryPerformanceCounter(&end_counter);
+
+                i64 cycles_elapsed = end_cycle_count - last_cycle_count;
+                i64 counter_elapsed = end_counter.QuadPart - last_counter.QuadPart;
+                f32 ms_per_frame =
+                    static_cast<f32>(1000.0f * static_cast<f32>(counter_elapsed) / static_cast<f32>(perf_freq));
+                f32 fps = static_cast<f32>(static_cast<f32>(perf_freq) / static_cast<f32>(counter_elapsed));
+                f32 mcpf = static_cast<f32>(static_cast<f32>(cycles_elapsed) / (1000.0f * 1000.0f));
+
+                win32_log(LogSeverity::Info, "%.02fms/f | %.02ffps | %.02fmcpf\n", ms_per_frame, fps, mcpf);
+
+                last_counter = end_counter;
+                last_cycle_count = end_cycle_count;
             }
         } else {
             // TODO logging
