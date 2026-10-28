@@ -2,7 +2,9 @@
 #include <stdint.h>
 #include <windows.h>
 #include <xinput.h>
-#include <dsound.h>
+#include <xaudio2.h>
+#include <array>
+#include <vector>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -16,6 +18,14 @@ typedef int64_t i64;
 
 typedef float f32;
 
+// constants
+static constexpr int k_bytes_per_pixel = 4;
+static constexpr int k_audio_buffer_size = 480 * 4;
+static constexpr int k_audio_buffer_count = 4;
+static constexpr int k_audio_queued_buffer_count = 3;
+static constexpr f32 k_pi = 3.141592653459f;
+static constexpr u32 k_sound_samples = 48000;
+
 struct Win32OffscreenBuffer {
     BITMAPINFO bitmap_info;
     void* memory;
@@ -26,24 +36,35 @@ struct Win32OffscreenBuffer {
 };
 
 struct Win32SoundOutput {
-    u32 samples_per_second;
-    u32 tone_hz;
-    i16 tone_volume;
-    u32 running_sample_idx;
-    u32 wave_period;
-    int bytes_per_sample;
-    u32 buffer_size;
-    f32 t_sine;
-    u32 latency_sample_count;
+    u32 samples_per_second = k_sound_samples;
+    u32 tone_hz = 256;
+    i16 tone_volume = 500;
+    u32 running_sample_idx = 0;
+    u32 wave_period = k_sound_samples / 256;
+    int bytes_per_sample = sizeof(i16) * 2;
+    u32 buffer_size = 0;
+    f32 t_sine = 0.0f;
+    u32 latency_sample_count = 0;
+    bool started = false;
 };
+
+struct Win32AudioBuffer {
+    std::vector<i16> samples;
+};
+
+struct Win32Audio {
+    IXAudio2* engine = nullptr;
+    IXAudio2MasteringVoice* mastering_voice = nullptr;
+    IXAudio2SourceVoice* source_voice = nullptr;
+
+    std::array<Win32AudioBuffer, k_audio_buffer_count> buffers;
+    u32 next_buffer_idx = 0;
+};
+
 
 static bool running;
 static Win32OffscreenBuffer global_backbuffer;
-static LPDIRECTSOUNDBUFFER global_sound_buffer;
-
-// constants
-const int k_bytes_per_pixel = 4;
-const f32 k_pi = 3.141592653459f;
+static Win32Audio global_audio;
 
 struct Win32WindowDim {
     int width;
@@ -66,10 +87,6 @@ X_INPUT_SET_STATE(xinput_set_state_stub) {
 static x_input_set_state* xinput_set_state_ = &xinput_set_state_stub;
 #define XInputSetState xinput_set_state_
 
-#define DIRECT_SOUND_CREATE(name) \
-    HRESULT WINAPI name(LPGUID pc_guid_device, LPDIRECTSOUND* pp_ds, LPUNKNOWN p_unk_outer)
-typedef DIRECT_SOUND_CREATE(_DirectSoundCreate);
-
 static void win32_load_xinput() {
     HMODULE lib = LoadLibrary("xinput1_4.dll");
     if (!lib) {
@@ -82,110 +99,173 @@ static void win32_load_xinput() {
     }
 }
 
-static void win32_init_dsound(HWND window, u32 samples_per_second, u32 buffer_size) {
-    HMODULE lib = LoadLibrary("dsound.dll");
-    if (lib) {
-        _DirectSoundCreate* direct_sound_create = (_DirectSoundCreate*)GetProcAddress(lib, "DirectSoundCreate");
-        LPDIRECTSOUND direct_sound;
-        if (!direct_sound_create || !SUCCEEDED(direct_sound_create(0, &direct_sound, 0))) {
-            OutputDebugString("[warn] error creating direct sound handle");
-            return;
-        }
-        if (!SUCCEEDED(direct_sound->SetCooperativeLevel(window, DSSCL_PRIORITY))) {
-            OutputDebugString("[warn] error setting dsound coop level");
-            return;
+static void win32_log_hresult(const char* op, HRESULT hr) {
+    char message[1024] = {};
+
+    DWORD length = FormatMessage(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr,
+        static_cast<DWORD>(hr),
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        message,
+        static_cast<DWORD>(sizeof(message)),
+        nullptr
+    );
+
+    char output[2048] = {};
+
+    if (length > 0) {
+        // Remove trailing CR/LF from the system message.
+        while (length > 0 && (message[length - 1] == '\r' || message[length - 1] == '\n')) {
+            message[--length] = '\0';
         }
 
-        DSBUFFERDESC buffer_desc = {
-            .dwSize = sizeof(buffer_desc),
-            .dwFlags = DSBCAPS_PRIMARYBUFFER,
-        };
-        LPDIRECTSOUNDBUFFER sound_buffer;
-        if (!SUCCEEDED(direct_sound->CreateSoundBuffer(&buffer_desc, &sound_buffer, 0))) {
-            OutputDebugString("[warn] error setting dsound buffer");
-            return;
-        }
-
-        WAVEFORMATEX wave_fmt = {
-            .wFormatTag = WAVE_FORMAT_PCM,
-            .nChannels = 2,
-            .nSamplesPerSec = samples_per_second,
-            .wBitsPerSample = 16,
-        };
-        wave_fmt.nBlockAlign = wave_fmt.nChannels * wave_fmt.wBitsPerSample / 8;
-        wave_fmt.nAvgBytesPerSec = wave_fmt.nSamplesPerSec * wave_fmt.nBlockAlign;
-        if (!SUCCEEDED(sound_buffer->SetFormat(&wave_fmt))) {
-            OutputDebugString("[warn] error setting dsound format");
-            return;
-        }
-
-        DSBUFFERDESC sec_buffer_desc = {
-            .dwSize = sizeof(sec_buffer_desc),
-            .dwFlags = 0,
-            .dwBufferBytes = buffer_size,
-            .lpwfxFormat = &wave_fmt,
-        };
-        if (!SUCCEEDED(direct_sound->CreateSoundBuffer(&sec_buffer_desc, &global_sound_buffer, 0))) {
-            OutputDebugString("[warn] error creating secondary dsound buffer");
-            return;
-        }
+        snprintf(
+            output,
+            sizeof(output),
+            "[error] %s failed: HRESULT=0x%08lX (%s)\n",
+            op,
+            static_cast<unsigned long>(hr),
+            message
+        );
+    } else {
+        snprintf(
+            output,
+            sizeof(output),
+            "[error] %s failed: HRESULT=0x%08lX "
+            "(no system message available)\n",
+            op,
+            static_cast<unsigned long>(hr)
+        );
     }
+
+    OutputDebugString(output);
+}
+
+static bool win32_init_xaudio2(Win32SoundOutput& sound_output, u32 samples_per_second, u32 buffer_size) {
+    sound_output.samples_per_second = samples_per_second;
+    sound_output.bytes_per_sample = 2 * sizeof(i16);
+    sound_output.buffer_size = buffer_size;
+
+    if (buffer_size == 0 || buffer_size % sound_output.bytes_per_sample != 0) {
+        OutputDebugString("[warn] invalid audio buffer size\n");
+        return false;
+    }
+
+    HRESULT hr = XAudio2Create(&global_audio.engine, 0, XAUDIO2_DEFAULT_PROCESSOR);
+    if (FAILED(hr)) {
+        win32_log_hresult("creating XAudio2 engine", hr);
+        return false;
+    }
+
+    hr = global_audio.engine->CreateMasteringVoice(&global_audio.mastering_voice);
+    if (FAILED(hr)) {
+        win32_log_hresult("creating XAudio2 mastering voice", hr);
+        return false;
+    }
+
+    WAVEFORMATEX wave_fmt = {};
+    wave_fmt.wFormatTag = WAVE_FORMAT_PCM;
+    wave_fmt.nChannels = 2;
+    wave_fmt.nSamplesPerSec = samples_per_second;
+    wave_fmt.wBitsPerSample = 16;
+    wave_fmt.nBlockAlign = wave_fmt.nChannels * wave_fmt.wBitsPerSample / 8;
+    wave_fmt.nAvgBytesPerSec = wave_fmt.nSamplesPerSec * wave_fmt.nBlockAlign;
+
+    hr = global_audio.engine->CreateSourceVoice(&global_audio.source_voice, &wave_fmt);
+    if (FAILED(hr)) {
+        win32_log_hresult("creating XAudio2 source voice", hr);
+        return false;
+    }
+
+    // Allocate every buffer before playback starts.
+    const u32 frame_count = buffer_size / sound_output.bytes_per_sample;
+
+    for (Win32AudioBuffer& buffer : global_audio.buffers) {
+        buffer.samples.resize(frame_count * 2);
+    }
+
+    sound_output.running_sample_idx = 0;
+    global_audio.next_buffer_idx = 0;
+
+    return true;
 }
 
 static void update_sound_buffer_region(Win32SoundOutput& sound_output, void* region, DWORD region_size) {
-    i16* sample_out = (i16*)region;
-    DWORD region_sample_count = region_size / sound_output.bytes_per_sample;
-    for (DWORD idx = 0; idx < region_sample_count; idx++) {
+    i16* sample_out = static_cast<i16*>(region);
+    DWORD frame_count = region_size / sound_output.bytes_per_sample;
+
+    for (DWORD idx = 0; idx < frame_count; idx++) {
         f32 sine = sinf(sound_output.t_sine);
-        i16 sample = (i16)(sine * sound_output.tone_volume);
+        i16 sample = static_cast<i16>(sine * sound_output.tone_volume);
         *sample_out++ = sample;
         *sample_out++ = sample;
-        sound_output.t_sine += 2.0f * k_pi * 1.0f / (f32)sound_output.wave_period;
+        sound_output.t_sine += 2.0f * k_pi * 1.0f / static_cast<f32>(sound_output.wave_period);
         ++sound_output.running_sample_idx;
     }
 }
 
-static void fill_sound_buffer(Win32SoundOutput& sound_output, DWORD offset, DWORD bytes) {
-    void* region1 = nullptr;
-    DWORD region1_size;
-    void* region2 = nullptr;
-    DWORD region2_size;
-
-    HRESULT error = global_sound_buffer->Lock(offset, bytes, &region1, &region1_size, &region2, &region2_size, 0);
-    if (!SUCCEEDED(error)) {
-        OutputDebugString("[warn] error locking sound buffer\n");
-        return;
+static bool fill_sound_buffer(Win32SoundOutput& sound_output, u32 buffer_idx) {
+    if (buffer_idx >= k_audio_buffer_count || !global_audio.source_voice) {
+        return false;
     }
-    OutputDebugString("[success] locking sound buffer\n");
 
-    update_sound_buffer_region(sound_output, region1, region1_size);
-    update_sound_buffer_region(sound_output, region2, region2_size);
+    Win32AudioBuffer& audio_buffer = global_audio.buffers[buffer_idx];
 
-    global_sound_buffer->Unlock(region1, region1_size, region2, region2_size);
+    const u32 byte_count = static_cast<u32>(audio_buffer.samples.size() * sizeof(i16));
+
+    update_sound_buffer_region(sound_output, audio_buffer.samples.data(), byte_count);
+
+    XAUDIO2_BUFFER buffer = {};
+    buffer.AudioBytes = byte_count;
+    buffer.pAudioData = reinterpret_cast<const BYTE*>(audio_buffer.samples.data());
+
+    // No END_OF_STREAM: this is a continuous stream.
+    buffer.Flags = 0;
+
+    HRESULT hr = global_audio.source_voice->SubmitSourceBuffer(&buffer);
+    if (FAILED(hr)) {
+        win32_log_hresult("submitting XAudio2 buffer", hr);
+        return false;
+    }
+
+    return true;
 }
 
-static void process_audio(Win32SoundOutput& sound_output) {
-    DWORD play_cursor;
-    DWORD write_cursor;
-    if (!SUCCEEDED(global_sound_buffer->GetCurrentPosition(&play_cursor, &write_cursor))) {
-        OutputDebugString("[warn] error getting sound buffer current position\n");
-        return;
+static bool process_audio(Win32SoundOutput& sound_output) {
+    if (!global_audio.source_voice) {
+        return false;
     }
 
-    DWORD bytes;
-    DWORD offset = (sound_output.running_sample_idx * sound_output.bytes_per_sample) % sound_output.buffer_size;
-    DWORD target_cursor =
-        (play_cursor + (sound_output.latency_sample_count * sound_output.bytes_per_sample)) % sound_output.buffer_size;
-    if (offset > target_cursor) {
-        bytes = sound_output.buffer_size - offset;
-        bytes += target_cursor;
-    } else {
-        bytes = target_cursor - offset;
+    XAUDIO2_VOICE_STATE state = {};
+    global_audio.source_voice->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+
+    while (state.BuffersQueued < k_audio_queued_buffer_count) {
+        const u32 buffer_idx = global_audio.next_buffer_idx;
+
+        if (!fill_sound_buffer(sound_output, buffer_idx)) {
+            return false;
+        }
+
+        global_audio.next_buffer_idx = (global_audio.next_buffer_idx + 1) % k_audio_buffer_count;
+
+        // Account for the newly submitted buffer.
+        ++state.BuffersQueued;
     }
 
-    fill_sound_buffer(sound_output, offset, bytes);
+    // Start playback after the initial queue has been populated.
+    if (!sound_output.started) {
+        HRESULT hr = global_audio.source_voice->Start();
+        if (FAILED(hr)) {
+            win32_log_hresult("starting XAudio2 voice", hr);
+            return false;
+        }
+
+        sound_output.started = true;
+    }
+
+    return true;
 }
-
 
 Win32WindowDim get_window_dim(HWND window) {
     RECT rect;
@@ -361,19 +441,11 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
             int y_offset = 0;
             win32_load_xinput();
 
-            Win32SoundOutput sound_output = {
-                .samples_per_second = 48000,
-                .tone_hz = 256,
-                .tone_volume = 500,
-                .running_sample_idx = 0,
-                .wave_period = sound_output.samples_per_second / sound_output.tone_hz,
-                .bytes_per_sample = sizeof(i16) * 2,
-                .buffer_size = sound_output.samples_per_second * sound_output.bytes_per_sample,
-                .latency_sample_count = sound_output.samples_per_second / 10,
-            };
-            win32_init_dsound(window_handle, sound_output.samples_per_second, sound_output.buffer_size);
-            fill_sound_buffer(sound_output, 0, sound_output.latency_sample_count * sound_output.bytes_per_sample);
-            bool sound_is_playing = false;
+            Win32SoundOutput sound_output = {};
+            if (!win32_init_xaudio2(sound_output, k_sound_samples, k_audio_buffer_size)) {
+                OutputDebugString("[error] failed to init XAudio2\n");
+                running = false;
+            }
 
             while (running) {
                 MSG message;
@@ -416,11 +488,6 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
 
                 render_gradient(global_backbuffer, x_offset, y_offset);
                 process_audio(sound_output);
-
-                if (!sound_is_playing) {
-                    global_sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
-                    sound_is_playing = true;
-                }
 
                 HDC device_ctx = GetDC(window_handle);
                 Win32WindowDim window_dim = get_window_dim(window_handle);
