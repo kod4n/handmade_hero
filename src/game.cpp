@@ -1,5 +1,5 @@
 #include "types.h"
-#include "handmade.h"
+#include "game.h"
 
 static u32 pack_color(u8 r, u8 g, u8 b, u8 a = 0) {
     return (static_cast<u32>(a) << 24 | static_cast<u32>(r) << 16 | static_cast<u32>(g) << 8 | static_cast<u32>(b));
@@ -10,7 +10,7 @@ static void render_gradient(GameOffscreenBuffer& buffer, int green_offset, int b
     for (int y = 0; y < buffer.height; y++) {
         u32* pixel = reinterpret_cast<u32*>(row);
         for (int x = 0; x < buffer.width; x++) {
-            *pixel++ = pack_color(0, y + green_offset, x + blue_offset);
+            *pixel++ = pack_color(0, x + green_offset, y + blue_offset);
         }
         row += buffer.pitch;
     }

@@ -1,4 +1,4 @@
-#ifndef HANDEMADE_H
+#pragma once
 
 struct GameOffscreenBuffer {
     void* memory;
@@ -8,6 +8,3 @@ struct GameOffscreenBuffer {
 };
 
 static void game_render(GameOffscreenBuffer& buffer, int green_offset, int blue_offset);
-
-#define HANDEMADE_H
-#endif

@@ -1,4 +1,4 @@
-#include "handmade.cpp"
+#include "game.cpp"
 
 #include <math.h>
 #include <windows.h>
