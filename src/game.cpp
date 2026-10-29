@@ -1,4 +1,5 @@
 #include "types.h"
+#include "math.h"
 #include "game.h"
 
 static u32 pack_color(u8 r, u8 g, u8 b, u8 a = 0) {
@@ -13,6 +14,23 @@ static void render_gradient(GameOffscreenBuffer& buffer, int green_offset, int b
             *pixel++ = pack_color(0, x + green_offset, y + blue_offset);
         }
         row += buffer.pitch;
+    }
+}
+
+static void game_sound(GameAudioBuffer& audio, GameAudioState& state) {
+    const f32 phase_step = 2.0f * k_pi * state.tone_hz / static_cast<f32>(audio.samples_per_second);
+
+    i16* sample_out = audio.samples;
+    for (u32 frame = 0; frame < audio.sample_count; ++frame) {
+        f32 sine = sinf(state.t_sine);
+        i16 sample = static_cast<i16>(sine * state.tone_volume);
+        *sample_out++ = sample;
+        *sample_out++ = sample;
+        state.t_sine += phase_step;
+    }
+
+    if (state.t_sine >= 2.0f * k_pi) {
+        state.t_sine -= 2.0f * k_pi;
     }
 }
 

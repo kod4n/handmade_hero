@@ -1,4 +1,5 @@
 #include "game.cpp"
+#include "game.h"
 
 #include <math.h>
 #include <windows.h>
@@ -10,12 +11,18 @@
 #include <vector>
 
 // constants
+// audio
+static constexpr u32 k_audio_channels = 2;
+static constexpr u32 k_audio_bits_per_channel_sample = 16;
+static constexpr u32 k_audio_bytes_per_frame = sizeof(i16) * k_audio_channels;
+static constexpr int k_audio_frames_per_buffer = 480;
+static constexpr u32 k_audio_buffer_size_bytes = k_audio_frames_per_buffer * k_audio_bytes_per_frame;
+static constexpr u32 k_audio_buffer_count = 4;
+static constexpr u32 k_audio_queued_buffer_count = 3;
+static constexpr u32 k_sound_samples_per_second = 48000;
+
+// screen buffer
 static constexpr int k_bytes_per_pixel = 4;
-static constexpr int k_audio_buffer_size = 480 * 4;
-static constexpr int k_audio_buffer_count = 4;
-static constexpr int k_audio_queued_buffer_count = 3;
-static constexpr f32 k_pi = 3.141592653459f;
-static constexpr u32 k_sound_samples = 48000;
 
 struct Win32OffscreenBuffer {
     BITMAPINFO bitmap_info;
@@ -27,17 +34,10 @@ struct Win32OffscreenBuffer {
 };
 
 struct Win32SoundOutput {
-    u32 samples_per_second = k_sound_samples;
-    u32 tone_hz = 256;
-    i16 tone_volume = 500;
-    u32 running_sample_idx = 0;
-    u32 wave_period = k_sound_samples / 256;
-    int bytes_per_sample = sizeof(i16) * 2;
-    u32 buffer_size = 0;
-    f32 t_sine = 0.0f;
-    u32 latency_sample_count = 0;
+    u32 samples_per_second = k_sound_samples_per_second;
+    u32 buffer_size_bytes = k_audio_buffer_size_bytes;
     bool started = false;
-    bool enabled = false;
+    bool enabled = true;
 };
 
 struct Win32AudioBuffer {
@@ -181,16 +181,7 @@ static void win32_log(LogSeverity severity, const char* format, ...) {
     }
 }
 
-static bool win32_init_xaudio2(Win32SoundOutput& sound_output, u32 samples_per_second, u32 buffer_size) {
-    sound_output.samples_per_second = samples_per_second;
-    sound_output.bytes_per_sample = 2 * sizeof(i16);
-    sound_output.buffer_size = buffer_size;
-
-    if (buffer_size == 0 || buffer_size % sound_output.bytes_per_sample != 0) {
-        OutputDebugString("[warn] invalid audio buffer size\n");
-        return false;
-    }
-
+static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {
     HRESULT hr = XAudio2Create(&global_audio.engine, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(hr)) {
         win32_log_hresult("creating XAudio2 engine", hr);
@@ -203,12 +194,13 @@ static bool win32_init_xaudio2(Win32SoundOutput& sound_output, u32 samples_per_s
         return false;
     }
 
-    WAVEFORMATEX wave_fmt = {};
-    wave_fmt.wFormatTag = WAVE_FORMAT_PCM;
-    wave_fmt.nChannels = 2;
-    wave_fmt.nSamplesPerSec = samples_per_second;
-    wave_fmt.wBitsPerSample = 16;
-    wave_fmt.nBlockAlign = wave_fmt.nChannels * wave_fmt.wBitsPerSample / 8;
+    WAVEFORMATEX wave_fmt = {
+        .wFormatTag = WAVE_FORMAT_PCM,
+        .nChannels = k_audio_channels,
+        .nSamplesPerSec = sound_output.samples_per_second,
+        .nBlockAlign = k_audio_bytes_per_frame,
+        .wBitsPerSample = k_audio_bits_per_channel_sample,
+    };
     wave_fmt.nAvgBytesPerSec = wave_fmt.nSamplesPerSec * wave_fmt.nBlockAlign;
 
     hr = global_audio.engine->CreateSourceVoice(&global_audio.source_voice, &wave_fmt);
@@ -218,51 +210,41 @@ static bool win32_init_xaudio2(Win32SoundOutput& sound_output, u32 samples_per_s
     }
 
     // Allocate every buffer before playback starts.
-    const u32 frame_count = buffer_size / sound_output.bytes_per_sample;
+    const u32 frame_count = sound_output.buffer_size_bytes / k_audio_bytes_per_frame;
 
     for (Win32AudioBuffer& buffer : global_audio.buffers) {
-        buffer.samples.resize(frame_count * 2);
+        buffer.samples.resize(frame_count * k_audio_channels);
     }
 
-    sound_output.running_sample_idx = 0;
     global_audio.next_buffer_idx = 0;
+    sound_output.started = false;
 
     return true;
 }
 
-static void update_sound_buffer_region(Win32SoundOutput& sound_output, void* region, DWORD region_size) {
-    i16* sample_out = static_cast<i16*>(region);
-    DWORD frame_count = region_size / sound_output.bytes_per_sample;
-
-    for (DWORD idx = 0; idx < frame_count; idx++) {
-        f32 sine = sinf(sound_output.t_sine);
-        i16 sample = static_cast<i16>(sine * sound_output.tone_volume);
-        *sample_out++ = sample;
-        *sample_out++ = sample;
-        sound_output.t_sine += 2.0f * k_pi * 1.0f / static_cast<f32>(sound_output.wave_period);
-        ++sound_output.running_sample_idx;
-    }
-}
-
-static bool fill_sound_buffer(Win32SoundOutput& sound_output, u32 buffer_idx) {
+static bool fill_sound_buffer(Win32SoundOutput& sound_output, GameAudioState& audio_state, u32 buffer_idx) {
     if (buffer_idx >= k_audio_buffer_count || !global_audio.source_voice) {
         return false;
     }
 
     Win32AudioBuffer& audio_buffer = global_audio.buffers[buffer_idx];
 
-    const u32 byte_count = static_cast<u32>(audio_buffer.samples.size() * sizeof(i16));
-
-    update_sound_buffer_region(sound_output, audio_buffer.samples.data(), byte_count);
+    GameAudioBuffer game_buffer = {
+        .samples = audio_buffer.samples.data(),
+        .sample_count = static_cast<u32>(audio_buffer.samples.size() / k_audio_channels),
+        .samples_per_second = sound_output.samples_per_second,
+    };
+    game_sound(game_buffer, audio_state);
 
     XAUDIO2_BUFFER buffer = {};
-    buffer.AudioBytes = byte_count;
+    buffer.AudioBytes = static_cast<u32>(audio_buffer.samples.size() * sizeof(i16));
     buffer.pAudioData = reinterpret_cast<const BYTE*>(audio_buffer.samples.data());
 
     // No END_OF_STREAM: this is a continuous stream.
     buffer.Flags = 0;
 
     HRESULT hr = global_audio.source_voice->SubmitSourceBuffer(&buffer);
+
     if (FAILED(hr)) {
         win32_log_hresult("submitting XAudio2 buffer", hr);
         return false;
@@ -271,7 +253,7 @@ static bool fill_sound_buffer(Win32SoundOutput& sound_output, u32 buffer_idx) {
     return true;
 }
 
-static bool process_audio(Win32SoundOutput& sound_output) {
+static bool process_audio(Win32SoundOutput& sound_output, GameAudioState& audio_state) {
     if (!global_audio.source_voice || !sound_output.enabled) {
         return false;
     }
@@ -282,7 +264,7 @@ static bool process_audio(Win32SoundOutput& sound_output) {
     while (state.BuffersQueued < k_audio_queued_buffer_count) {
         const u32 buffer_idx = global_audio.next_buffer_idx;
 
-        if (!fill_sound_buffer(sound_output, buffer_idx)) {
+        if (!fill_sound_buffer(sound_output, audio_state, buffer_idx)) {
             return false;
         }
 
@@ -485,8 +467,9 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
             win32_load_xinput();
 
             Win32SoundOutput sound_output = {};
-            if (!win32_init_xaudio2(sound_output, k_sound_samples, k_audio_buffer_size)) {
-                OutputDebugString("[error] failed to init XAudio2\n");
+            GameAudioState audio_state = {};
+            if (!win32_init_xaudio2(sound_output)) {
+                win32_log(LogSeverity::Error, "failed to init XAudio2\n");
                 running = false;
             }
 
@@ -527,8 +510,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                         x_offset += stick_x / 4096;
                         y_offset += stick_y / 4096;
 
-                        sound_output.tone_hz = 512 + (int)(256.0f * ((f32)stick_y / 30000.0f));
-                        sound_output.wave_period = sound_output.samples_per_second / sound_output.tone_hz;
+                        audio_state.tone_hz = 512 + (int)(256.0f * ((f32)stick_y / 30000.0f));
                     } else {
                         win32_log(LogSeverity::Warn, "cannot get controller %d state", idx);
                     }
@@ -541,7 +523,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                     .pitch = global_backbuffer.pitch,
                 };
                 game_render(offscreen_buffer, x_offset, y_offset);
-                process_audio(sound_output);
+                process_audio(sound_output, audio_state);
 
                 HDC device_ctx = GetDC(window_handle);
                 Win32WindowDim window_dim = get_window_dim(window_handle);
