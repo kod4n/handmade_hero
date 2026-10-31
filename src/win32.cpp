@@ -530,8 +530,6 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                         new_input->start_y = old_input->end_y;
                         new_input->min_x = new_input->max_x = new_input->end_x = stick_x;
                         new_input->min_y = new_input->max_y = new_input->end_y = stick_y;
-                    } else {
-                        win32_log(LogSeverity::Warn, "cannot get controller %d state", idx);
                     }
                 }
 
