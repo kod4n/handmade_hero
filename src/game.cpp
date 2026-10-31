@@ -34,6 +34,18 @@ static void game_sound(GameAudioBuffer& audio, GameAudioState& state) {
     }
 }
 
-static void game_render(GameOffscreenBuffer& buffer, int green_offset, int blue_offset) {
+static void game_render(GameOffscreenBuffer& buffer, GameInput& input, GameAudioState& audio_state) {
+    // move these into a GameState struct at some point, or just remove
+    static int green_offset = 0;
+    static int blue_offset = 0;
+
+    GameControllerInput* controller = &input.controllers[0];
+    if (controller->is_analog) {  // controller
+        audio_state.tone_hz = 256 + static_cast<int>(128.0f * controller->end_x);
+        green_offset += static_cast<int>(4.0f * controller->end_x);
+        blue_offset += static_cast<int>(4.0f * controller->end_y);
+    } else {  // mkb
+    }
+
     render_gradient(buffer, green_offset, blue_offset);
 }

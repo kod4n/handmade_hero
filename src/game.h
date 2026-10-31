@@ -23,6 +23,41 @@ struct GameAudioState {
     f32 tone_volume = 500.0f;
 };
 
+struct GameButtonState {
+    i32 half_transition_count;
+    bool ended_down;
+};
+
+struct GameControllerInput {
+    bool is_analog;
+
+    // stick positions
+    f32 start_x;
+    f32 start_y;
+    f32 end_x;
+    f32 end_y;
+    f32 max_x;
+    f32 max_y;
+    f32 min_x;
+    f32 min_y;
+
+    union {
+        GameButtonState buttons[6];
+        struct {
+            GameButtonState u;
+            GameButtonState d;
+            GameButtonState l;
+            GameButtonState r;
+            GameButtonState ls;
+            GameButtonState rs;
+        };
+    };
+};
+
+struct GameInput {
+    GameControllerInput controllers[4];
+};
+
 static void game_sound(GameAudioBuffer& buffer, GameAudioState& state);
 
-static void game_render(GameOffscreenBuffer& buffer, int green_offset, int blue_offset);
+static void game_render(GameOffscreenBuffer& buffer);

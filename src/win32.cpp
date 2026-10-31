@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <windows.h>
+#include <winnt.h>
 #include <xinput.h>
 #include <xaudio2.h>
 #include <strsafe.h>
@@ -37,7 +38,7 @@ struct Win32SoundOutput {
     u32 samples_per_second = k_sound_samples_per_second;
     u32 buffer_size_bytes = k_audio_buffer_size_bytes;
     bool started = false;
-    bool enabled = true;
+    bool enabled = false;
 };
 
 struct Win32AudioBuffer {
@@ -431,6 +432,21 @@ LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPAR
     return result;
 }
 
+static void win32_process_xinput_button(
+    DWORD button_state,
+    DWORD button_bit,
+    GameButtonState& old_state,
+    GameButtonState& new_state
+) {
+    new_state.ended_down = (button_state & button_bit) == button_bit;
+    new_state.half_transition_count = (old_state.ended_down != new_state.ended_down) ? 1 : 0;
+}
+
+static f32 win32_normalize_xinput_stick(i16 raw_value) {
+    f32 divisor = raw_value < 0 ? 32768.0f : 32767.0f;
+    return static_cast<f32>(raw_value) / divisor;
+}
+
 int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd_line, int n_cmd_show) {
     LARGE_INTEGER perf_freq_res;
     QueryPerformanceFrequency(&perf_freq_res);
@@ -462,8 +478,6 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
         );
         if (window_handle) {
             running = true;
-            int x_offset = 0;
-            int y_offset = 0;
             win32_load_xinput();
 
             Win32SoundOutput sound_output = {};
@@ -477,6 +491,10 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
             LARGE_INTEGER last_counter;
             QueryPerformanceCounter(&last_counter);
 
+            GameInput input[2] = {};
+            GameInput curr_input = input[0];
+            GameInput prev_input = input[1];
+
             while (running) {
                 MSG message;
                 while (PeekMessage(&message, 0, 0, 0, PM_REMOVE)) {
@@ -487,30 +505,29 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                     DispatchMessage(&message);
                 }
 
-                for (DWORD idx = 0; idx < XUSER_MAX_COUNT; idx++) {
+                int max_controllers = XUSER_MAX_COUNT;
+                int input_controller_count = ARRAYSIZE(curr_input.controllers);
+                if (max_controllers > input_controller_count) {
+                    max_controllers = input_controller_count;
+                }
+
+                for (DWORD idx = 0; idx < max_controllers; idx++) {
+                    GameControllerInput* new_input = &curr_input.controllers[idx];
+                    GameControllerInput* old_input = &prev_input.controllers[idx];
+
                     XINPUT_STATE controller_state;
                     if (XInputGetState(idx, &controller_state) == ERROR_SUCCESS) {
                         XINPUT_GAMEPAD* pad = &controller_state.Gamepad;
-                        bool up = pad->wButtons & XINPUT_GAMEPAD_DPAD_UP;
-                        bool down = pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
-                        bool left = pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
-                        bool right = pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT;
-                        bool start = pad->wButtons & XINPUT_GAMEPAD_START;
-                        bool back = pad->wButtons & XINPUT_GAMEPAD_BACK;
-                        bool lb = pad->wButtons & XINPUT_GAMEPAD_DPAD_UP;
-                        bool rb = pad->wButtons & XINPUT_GAMEPAD_DPAD_UP;
-                        bool a_btn = pad->wButtons & XINPUT_GAMEPAD_A;
-                        bool b_btn = pad->wButtons & XINPUT_GAMEPAD_B;
-                        bool x_btn = pad->wButtons & XINPUT_GAMEPAD_X;
-                        bool y_btn = pad->wButtons & XINPUT_GAMEPAD_Y;
+                        new_input->is_analog = true;
+                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_A, new_input->u, old_input->u);
+                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_B, new_input->d, old_input->d);
+                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_X, new_input->l, old_input->l);
+                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_Y, new_input->r, old_input->r);
 
-                        i16 stick_x = pad->sThumbLX;
-                        i16 stick_y = pad->sThumbLY;
-
-                        x_offset += stick_x / 4096;
-                        y_offset += stick_y / 4096;
-
-                        audio_state.tone_hz = 512 + (int)(256.0f * ((f32)stick_y / 30000.0f));
+                        f32 stick_x = win32_normalize_xinput_stick(pad->sThumbLX);
+                        f32 stick_y = win32_normalize_xinput_stick(pad->sThumbLY);
+                        new_input->min_x = new_input->max_x = new_input->end_x = stick_x;
+                        new_input->min_y = new_input->max_y = new_input->end_y = stick_y;
                     } else {
                         win32_log(LogSeverity::Warn, "cannot get controller %d state", idx);
                     }
@@ -522,7 +539,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                     .height = global_backbuffer.height,
                     .pitch = global_backbuffer.pitch,
                 };
-                game_render(offscreen_buffer, x_offset, y_offset);
+                game_render(offscreen_buffer, curr_input, audio_state);
                 process_audio(sound_output, audio_state);
 
                 HDC device_ctx = GetDC(window_handle);
@@ -545,6 +562,10 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
 
                 last_counter = end_counter;
                 last_cycle_count = end_cycle_count;
+
+                GameInput tmp_input = curr_input;
+                curr_input = prev_input;
+                prev_input = tmp_input;
             }
         } else {
             // TODO logging
