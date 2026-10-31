@@ -3,7 +3,6 @@
 
 #include <math.h>
 #include <windows.h>
-#include <winnt.h>
 #include <xinput.h>
 #include <xaudio2.h>
 #include <strsafe.h>
@@ -223,14 +222,14 @@ static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {
     return true;
 }
 
-static bool fill_sound_buffer(Win32SoundOutput& sound_output, GameAudioState& audio_state, u32 buffer_idx) {
+static bool fill_sound_buffer(Win32SoundOutput& sound_output, AudioState& audio_state, u32 buffer_idx) {
     if (buffer_idx >= k_audio_buffer_count || !global_audio.source_voice) {
         return false;
     }
 
     Win32AudioBuffer& audio_buffer = global_audio.buffers[buffer_idx];
 
-    GameAudioBuffer game_buffer = {
+    AudioBuffer game_buffer = {
         .samples = audio_buffer.samples.data(),
         .sample_count = static_cast<u32>(audio_buffer.samples.size() / k_audio_channels),
         .samples_per_second = sound_output.samples_per_second,
@@ -254,7 +253,7 @@ static bool fill_sound_buffer(Win32SoundOutput& sound_output, GameAudioState& au
     return true;
 }
 
-static bool process_audio(Win32SoundOutput& sound_output, GameAudioState& audio_state) {
+static bool process_audio(Win32SoundOutput& sound_output, AudioState& audio_state) {
     if (!global_audio.source_voice || !sound_output.enabled) {
         return false;
     }
@@ -299,23 +298,6 @@ Win32WindowDim get_window_dim(HWND window) {
     return result;
 }
 
-static void render_gradient(Win32OffscreenBuffer buffer, int x_offset, int y_offset) {
-    u8* row = (u8*)buffer.memory;
-    for (int y = 0; y < buffer.height; y++) {
-        u32* pixel = (u32*)row;
-        for (int x = 0; x < buffer.width; x++) {
-            /*
-             * memory   : BB GG RR AA
-             * register : 0xAARRGGBB
-             */
-            u8 blue = x + x_offset;
-            u8 green = y + y_offset;
-            *pixel++ = (green << 8) | blue;
-        }
-        row += buffer.pitch;
-    }
-}
-
 static void win32_resize_dib_section(Win32OffscreenBuffer* backbuffer, int w, int h) {
     if (backbuffer->memory) {
         VirtualFree(backbuffer->memory, 0, MEM_RELEASE);
@@ -327,7 +309,7 @@ static void win32_resize_dib_section(Win32OffscreenBuffer* backbuffer, int w, in
         .bmiHeader = {
             .biSize = sizeof(BITMAPINFOHEADER),
             .biWidth = backbuffer->width,
-            .biHeight = backbuffer->height,
+            .biHeight = -backbuffer->height,
             .biPlanes = 1,
             .biBitCount = 32,
             .biCompression = BI_RGB,
@@ -338,7 +320,6 @@ static void win32_resize_dib_section(Win32OffscreenBuffer* backbuffer, int w, in
 
     int bitmap_memory_size = w * h * k_bytes_per_pixel;
     backbuffer->memory = VirtualAlloc(0, bitmap_memory_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    // render_gradient(*backbuffer, 128, 0);
 }
 
 static void win32_display_window_buffer(
@@ -435,8 +416,8 @@ LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPAR
 static void win32_process_xinput_button(
     DWORD button_state,
     DWORD button_bit,
-    GameButtonState& old_state,
-    GameButtonState& new_state
+    ButtonState& old_state,
+    ButtonState& new_state
 ) {
     new_state.ended_down = (button_state & button_bit) == button_bit;
     new_state.half_transition_count = (old_state.ended_down != new_state.ended_down) ? 1 : 0;
@@ -481,7 +462,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
             win32_load_xinput();
 
             Win32SoundOutput sound_output = {};
-            GameAudioState audio_state = {};
+            AudioState audio_state = {};
             if (!win32_init_xaudio2(sound_output)) {
                 win32_log(LogSeverity::Error, "failed to init XAudio2\n");
                 running = false;
@@ -491,9 +472,28 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
             LARGE_INTEGER last_counter;
             QueryPerformanceCounter(&last_counter);
 
-            GameInput input[2] = {};
-            GameInput curr_input = input[0];
-            GameInput prev_input = input[1];
+#if DEV
+            LPVOID base_address = reinterpret_cast<LPVOID>(size_tb(2));
+#else
+            LPVOID base_address = reinterpret_cast<LPVOID>(0);
+#endif
+
+            Storage storage = {
+                .main_size = size_mb(64),
+                .transient_size = size_gb(4),
+            };
+            u64 total_storage_size = storage.main_size + storage.transient_size;
+            storage.main = VirtualAlloc(base_address, total_storage_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            storage.transient = static_cast<u8*>(storage.main) + storage.main_size;
+
+            if (!storage.main) {
+                win32_log(LogSeverity::Error, "failed to allocate main game storage");
+                return 1;
+            }
+
+            Input input[2] = {};
+            Input curr_input = input[0];
+            Input prev_input = input[1];
 
             while (running) {
                 MSG message;
@@ -512,8 +512,8 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                 }
 
                 for (DWORD idx = 0; idx < max_controllers; idx++) {
-                    GameControllerInput* new_input = &curr_input.controllers[idx];
-                    GameControllerInput* old_input = &prev_input.controllers[idx];
+                    ControllerInput* new_input = &curr_input.controllers[idx];
+                    ControllerInput* old_input = &prev_input.controllers[idx];
 
                     XINPUT_STATE controller_state;
                     if (XInputGetState(idx, &controller_state) == ERROR_SUCCESS) {
@@ -526,6 +526,8 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
 
                         f32 stick_x = win32_normalize_xinput_stick(pad->sThumbLX);
                         f32 stick_y = win32_normalize_xinput_stick(pad->sThumbLY);
+                        new_input->start_x = old_input->end_x;
+                        new_input->start_y = old_input->end_y;
                         new_input->min_x = new_input->max_x = new_input->end_x = stick_x;
                         new_input->min_y = new_input->max_y = new_input->end_y = stick_y;
                     } else {
@@ -533,13 +535,13 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                     }
                 }
 
-                GameOffscreenBuffer offscreen_buffer = {
+                ScreenBuffer offscreen_buffer = {
                     .memory = global_backbuffer.memory,
                     .width = global_backbuffer.width,
                     .height = global_backbuffer.height,
                     .pitch = global_backbuffer.pitch,
                 };
-                game_render(offscreen_buffer, curr_input, audio_state);
+                game_render(storage, offscreen_buffer, curr_input, audio_state);
                 process_audio(sound_output, audio_state);
 
                 HDC device_ctx = GetDC(window_handle);
@@ -563,7 +565,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                 last_counter = end_counter;
                 last_cycle_count = end_cycle_count;
 
-                GameInput tmp_input = curr_input;
+                Input tmp_input = curr_input;
                 curr_input = prev_input;
                 prev_input = tmp_input;
             }
