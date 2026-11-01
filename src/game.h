@@ -1,6 +1,7 @@
 #pragma once
 
 #include "types.h"
+#include <cassert>
 
 static constexpr f32 k_pi = 3.141592653459f;
 
@@ -89,3 +90,19 @@ static u64 size_gb(u8 amount) {
 static u64 size_tb(u8 amount) {
     return size_gb(amount) * k_kilobyte;
 }
+
+inline u32 safe_truncate(u64 value) {
+    assert(value <= UINT32_MAX);
+    return static_cast<u32>(value);
+}
+
+#if DEV
+struct ReadFileResult {
+    u32 size;
+    void* content;
+};
+
+ReadFileResult dev_platform_read_file(const char* filename);
+void dev_platform_free_file(void* memory);
+bool dev_platform_write_file(const char* filename, u32 size, void* memory);
+#endif

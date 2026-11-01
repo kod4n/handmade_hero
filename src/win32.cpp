@@ -7,6 +7,7 @@
 #include <xaudio2.h>
 #include <strsafe.h>
 #include <array>
+#include <cassert>
 #include <cstdarg>
 #include <vector>
 
@@ -63,7 +64,8 @@ struct Win32WindowDim {
     int height;
 };
 
-#define X_INPUT_GET_STATE(name) DWORD WINAPI name(DWORD dwUserIndex, XINPUT_STATE* pState)
+#define X_INPUT_GET_STATE(name) \
+    DWORD WINAPI name(DWORD dwUserIndex [[maybe_unused]], XINPUT_STATE* pState [[maybe_unused]])
 typedef X_INPUT_GET_STATE(x_input_get_state);
 X_INPUT_GET_STATE(xinput_get_state_stub) {
     return 0;
@@ -71,7 +73,8 @@ X_INPUT_GET_STATE(xinput_get_state_stub) {
 static x_input_get_state* xinput_get_state_ = &xinput_get_state_stub;
 #define XInputGetState xinput_get_state_
 
-#define X_INPUT_SET_STATE(name) DWORD WINAPI name(DWORD dwUserIndex, XINPUT_VIBRATION* pVibration)
+#define X_INPUT_SET_STATE(name) \
+    DWORD WINAPI name(DWORD dwUserIndex [[maybe_unused]], XINPUT_VIBRATION* pVibration [[maybe_unused]])
 typedef X_INPUT_SET_STATE(x_input_set_state);
 X_INPUT_SET_STATE(xinput_set_state_stub) {
     return 0;
@@ -179,6 +182,53 @@ static void win32_log(LogSeverity severity, const char* format, ...) {
     } else {
         win32_log_hresult("debug message formatting failed", hr);
     }
+}
+
+ReadFileResult dev_platform_read_file(const char* filename) {
+    win32_log(LogSeverity::Info, "attempt file read for %s", filename);
+    ReadFileResult result = {};
+    HANDLE file = CreateFile(filename, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER file_size_res;
+        if (GetFileSizeEx(file, &file_size_res)) {
+            size_t file_size = static_cast<size_t>(file_size_res.QuadPart);
+            assert(file_size <= UINT32_MAX);
+            result.content = VirtualAlloc(nullptr, file_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (result.content) {
+                DWORD bytes_read;
+                u32 file_size_32 = safe_truncate(file_size);
+                if (ReadFile(file, result.content, file_size_32, &bytes_read, nullptr) && file_size_32 == bytes_read) {
+                    result.size = file_size_32;
+                } else {
+                    dev_platform_free_file(result.content);
+                    result.content = nullptr;
+                }
+            }
+        }
+        CloseHandle(file);
+    } else {
+        win32_log(LogSeverity::Warn, "failed to read file %s", filename);
+    }
+    return result;
+}
+
+void dev_platform_free_file(void* memory) {
+    VirtualFree(memory, 0, MEM_RELEASE);
+}
+
+bool dev_platform_write_file(const char* filename, u32 size, void* memory) {
+    bool result = false;
+    HANDLE file = CreateFile(filename, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD bytes_written;
+        if (WriteFile(file, memory, size, &bytes_written, nullptr)) {
+            result = bytes_written == size;
+        }
+        CloseHandle(file);
+    } else {
+        win32_log(LogSeverity::Warn, "failed to write file %s", filename);
+    }
+    return result;
 }
 
 static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {
