@@ -1,8 +1,8 @@
-#define NOMINMAX
-
 #include "game.cpp"
 #include "defer.h"
+#include "game.h"
 
+#define NOMINMAX
 #include <math.h>
 #include <windows.h>
 #include <xinput.h>
@@ -35,7 +35,7 @@ struct Win32OffscreenBuffer {
 struct Win32SoundOutput {
     u32 samples_per_second = k_sound_samples_per_second;
     bool started = false;
-    bool enabled = false;
+    bool enabled = true;
 };
 
 struct Win32AudioBuffer {
@@ -89,6 +89,29 @@ static void win32_load_xinput() {
         xinput_get_state_ = (x_input_get_state*)GetProcAddress(lib, "XInputGetState");
         xinput_set_state_ = (x_input_set_state*)GetProcAddress(lib, "XInputSetState");
     }
+}
+
+static void win32_process_kb_button(ActionState& state, bool is_down) {
+    state.ended_down = is_down;
+    state.half_transition_count++;
+}
+
+static void win32_process_xinput_button(
+    DWORD button_state,
+    DWORD button_bit,
+    ActionState& old_state,
+    ActionState& new_state
+) {
+    new_state.ended_down = (button_state & button_bit) == button_bit;
+    new_state.half_transition_count = (old_state.ended_down != new_state.ended_down) ? 1 : 0;
+}
+
+static f32 win32_normalize_xinput_stick(i16 raw_value, i16 dead_zone) {
+    if (raw_value > -dead_zone && raw_value < dead_zone) {
+        return 0.0f;
+    }
+    f32 divisor = raw_value < 0 ? 32768.0f : 32767.0f;
+    return raw_value / divisor;
 }
 
 static void win32_log_hresult(const char* op, HRESULT hr) {
@@ -385,6 +408,63 @@ static void win32_display_window_buffer(
     );
 }
 
+static void win32_process_message(ControllerInput& kb) {
+    MSG msg = {};
+    while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
+        switch (msg.message) {
+        case WM_SYSKEYUP:
+        case WM_SYSKEYDOWN:
+        case WM_KEYUP:
+        case WM_KEYDOWN: {
+            u32 vk_code = static_cast<u32>(msg.wParam);
+            bool was_down = (msg.lParam & (1 << 30)) != 0;
+            bool is_down = (msg.lParam & (1 << 31)) == 0;
+            if (was_down == is_down) {
+                break;
+            }
+
+            switch (vk_code) {
+            case VK_F4: {
+                bool is_alt_down = msg.lParam & (1 << 29);
+                if (is_alt_down) {
+                    running = false;
+                }
+            } break;
+
+            case 'W': {
+                win32_process_kb_button(input_action(kb, Action::MoveUp), is_down);
+            } break;
+
+            case 'A': {
+                win32_process_kb_button(input_action(kb, Action::MoveLeft), is_down);
+            } break;
+
+            case 'S': {
+                win32_process_kb_button(input_action(kb, Action::MoveDown), is_down);
+            } break;
+
+            case 'D': {
+                win32_process_kb_button(input_action(kb, Action::MoveRight), is_down);
+            } break;
+
+            case 'Q': {
+                win32_process_kb_button(input_action(kb, Action::LeftShoulder), is_down);
+            } break;
+
+            case 'E': {
+                win32_process_kb_button(input_action(kb, Action::RightShoulder), is_down);
+            } break;
+            }
+        } break;
+        default: {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        } break;
+        }
+        break;
+    }
+}
+
 LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPARAM l_param) {
     LRESULT result = 0;
     switch (message) {
@@ -406,43 +486,7 @@ LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPAR
     case WM_SYSKEYUP:
     case WM_KEYDOWN:
     case WM_KEYUP: {
-        u32 vk_code = w_param;
-        bool was_down = (l_param & (1 << 30)) != 0;
-        bool is_down = (l_param & (1 << 31)) == 0;
-        if (is_down == was_down) {
-            break;
-        }
-
-        if (vk_code == 'W') {
-        }
-        if (vk_code == 'A') {
-        }
-        if (vk_code == 'S') {
-        }
-        if (vk_code == 'D') {
-        }
-        if (vk_code == 'Q') {
-        }
-        if (vk_code == 'E') {
-        }
-        if (vk_code == VK_UP) {
-        }
-        if (vk_code == VK_DOWN) {
-        }
-        if (vk_code == VK_LEFT) {
-        }
-        if (vk_code == VK_RIGHT) {
-        }
-        if (vk_code == VK_ESCAPE) {
-        }
-        if (vk_code == VK_SPACE) {
-        }
-
-        bool alt_key_was_down = ((l_param >> 29) & 1) != 0;
-        if (vk_code == VK_F4 && alt_key_was_down) {
-            running = false;
-        }
-
+        assert(!"no keyboard messages");
         break;
     }
     default: {
@@ -451,21 +495,6 @@ LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPAR
     }
     }
     return result;
-}
-
-static void win32_process_xinput_button(
-    DWORD button_state,
-    DWORD button_bit,
-    ButtonState& old_state,
-    ButtonState& new_state
-) {
-    new_state.ended_down = (button_state & button_bit) == button_bit;
-    new_state.half_transition_count = (old_state.ended_down != new_state.ended_down) ? 1 : 0;
-}
-
-static f32 win32_normalize_xinput_stick(i16 raw_value) {
-    f32 divisor = raw_value < 0 ? 32768.0f : 32767.0f;
-    return static_cast<f32>(raw_value) / divisor;
 }
 
 int CALLBACK WinMain(
@@ -541,36 +570,124 @@ int CALLBACK WinMain(
             Input* prev_input = &input[1];
 
             while (running) {
-                MSG message;
-                while (PeekMessage(&message, 0, 0, 0, PM_REMOVE)) {
-                    if (message.message == WM_QUIT) {
-                        running = false;
-                    }
-                    TranslateMessage(&message);
-                    DispatchMessage(&message);
+                ControllerInput* kb = &curr_input->controllers[0];
+                ControllerInput* prev_kb = &prev_input->controllers[0];
+                *kb = {};
+                kb->is_connected = true;
+                for (u8 i = 0; i < ARRAYSIZE(kb->actions); i++) {
+                    kb->actions[i].ended_down = prev_kb->actions[i].ended_down;
                 }
+                win32_process_message(*kb);
 
                 constexpr DWORD max_controllers = std::min<DWORD>(XUSER_MAX_COUNT, k_max_controllers);
 
-                for (DWORD idx = 0; idx < max_controllers; idx++) {
-                    ControllerInput* new_input = &curr_input->controllers[idx];
-                    ControllerInput* old_input = &prev_input->controllers[idx];
+                for (DWORD idx = 0; idx < max_controllers - 1; idx++) {
+                    ControllerInput* new_input = &curr_input->controllers[idx + 1];
+                    ControllerInput* old_input = &prev_input->controllers[idx + 1];
 
                     XINPUT_STATE controller_state;
                     if (XInputGetState(idx, &controller_state) == ERROR_SUCCESS) {
                         XINPUT_GAMEPAD* pad = &controller_state.Gamepad;
                         new_input->is_analog = true;
-                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_A, old_input->u, new_input->u);
-                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_B, old_input->d, new_input->d);
-                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_X, old_input->l, new_input->l);
-                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_Y, old_input->r, new_input->r);
+                        new_input->is_connected = true;
 
-                        f32 stick_x = win32_normalize_xinput_stick(pad->sThumbLX);
-                        f32 stick_y = win32_normalize_xinput_stick(pad->sThumbLY);
-                        new_input->start_x = old_input->end_x;
-                        new_input->start_y = old_input->end_y;
-                        new_input->min_x = new_input->max_x = new_input->end_x = stick_x;
-                        new_input->min_y = new_input->max_y = new_input->end_y = stick_y;
+                        // stick
+                        new_input->stick_avg_x =
+                            win32_normalize_xinput_stick(pad->sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+                        new_input->stick_avg_y =
+                            win32_normalize_xinput_stick(pad->sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+
+                        // dpad, overrides joystick when used
+                        if (pad->wButtons & XINPUT_GAMEPAD_DPAD_UP) {
+                            new_input->is_analog = false;
+                            new_input->stick_avg_y = 1.0f;
+                        }
+                        if (pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN) {
+                            new_input->is_analog = false;
+                            new_input->stick_avg_y = -1.0f;
+                        }
+                        if (pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) {
+                            new_input->is_analog = false;
+                            new_input->stick_avg_x = 1.0f;
+                        }
+                        if (pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT) {
+                            new_input->is_analog = false;
+                            new_input->stick_avg_x = -1.0f;
+                        }
+
+                        f32 move_threshold = 0.5f;
+                        win32_process_xinput_button(
+                            (new_input->stick_avg_x < -move_threshold) ? 1 : 0,
+                            1,
+                            input_action(*old_input, Action::MoveLeft),
+                            input_action(*new_input, Action::MoveLeft)
+                        );
+                        win32_process_xinput_button(
+                            (new_input->stick_avg_x > move_threshold) ? 1 : 0,
+                            1,
+                            input_action(*old_input, Action::MoveRight),
+                            input_action(*new_input, Action::MoveRight)
+                        );
+                        win32_process_xinput_button(
+                            (new_input->stick_avg_y < -move_threshold) ? 1 : 0,
+                            1,
+                            input_action(*old_input, Action::MoveDown),
+                            input_action(*new_input, Action::MoveDown)
+                        );
+                        win32_process_xinput_button(
+                            (new_input->stick_avg_y > move_threshold) ? 1 : 0,
+                            1,
+                            input_action(*old_input, Action::MoveUp),
+                            input_action(*new_input, Action::MoveUp)
+                        );
+
+                        win32_log(
+                            LogSeverity::Info,
+                            "stick info: x = %.02f | y = %.02f | threshold = %.02f\n",
+                            new_input->stick_avg_x,
+                            new_input->stick_avg_y,
+                            move_threshold
+                        );
+
+                        // buttons
+                        win32_process_xinput_button(
+                            pad->wButtons,
+                            XINPUT_GAMEPAD_Y,
+                            input_action(*old_input, Action::ActionUp),
+                            input_action(*new_input, Action::ActionUp)
+                        );
+                        win32_process_xinput_button(
+                            pad->wButtons,
+                            XINPUT_GAMEPAD_A,
+                            input_action(*old_input, Action::ActionDown),
+                            input_action(*new_input, Action::ActionDown)
+                        );
+                        win32_process_xinput_button(
+                            pad->wButtons,
+                            XINPUT_GAMEPAD_X,
+                            input_action(*old_input, Action::ActionLeft),
+                            input_action(*new_input, Action::ActionLeft)
+                        );
+                        win32_process_xinput_button(
+                            pad->wButtons,
+                            XINPUT_GAMEPAD_B,
+                            input_action(*old_input, Action::ActionRight),
+                            input_action(*new_input, Action::ActionRight)
+                        );
+                        win32_process_xinput_button(
+                            pad->wButtons,
+                            XINPUT_GAMEPAD_LEFT_SHOULDER,
+                            input_action(*old_input, Action::LeftShoulder),
+                            input_action(*new_input, Action::LeftShoulder)
+                        );
+                        win32_process_xinput_button(
+                            pad->wButtons,
+                            XINPUT_GAMEPAD_RIGHT_SHOULDER,
+                            input_action(*old_input, Action::RightShoulder),
+                            input_action(*new_input, Action::RightShoulder)
+                        );
+                    } else {
+                        new_input->is_connected = false;
                     }
                 }
 

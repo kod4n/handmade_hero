@@ -9,9 +9,9 @@ static void render_gradient(ScreenBuffer& buffer, GameState& state) {
     u8 r = 0;
     for (u32 y = 0; y < buffer.height; y++) {
         std::span<u32> row = buffer.pixels.subspan(y * buffer.pitch, buffer.width);
-        auto g = static_cast<u8>(y + state.green_offset);
+        auto g = static_cast<u8>(y + state.y_offset);
         for (u32 x = 0; x < buffer.width; x++) {
-            auto b = static_cast<u8>(x + state.blue_offset);
+            auto b = static_cast<u8>(x + state.x_offset);
             row[x] = pack_color(r, g, b);
         }
     }
@@ -38,19 +38,32 @@ void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioStat
         Arena arena = arena_make(storage.main, storage.main_size);
         GameState* state = arena_push<GameState>(arena);
         state->permanent_arena = arena;
-        state->green_offset = 0;
-        state->blue_offset = 0;
+        state->x_offset = 0;
+        state->y_offset = 0;
 
         storage.is_initialized = true;
     }
     GameState* state = static_cast<GameState*>(storage.main);
 
-    ControllerInput* controller = &input.controllers[0];
-    if (controller->is_analog) {  // controller
-        audio_state.tone_hz = 256 + static_cast<int>(128.0f * controller->end_x);
-        state->blue_offset += static_cast<int>(4.0f * controller->end_x);
-        state->green_offset += static_cast<int>(-4.0f * controller->end_y);
-    } else {  // mkb
+    for (auto& controller : input.controllers) {
+        if (!controller.is_connected) {
+            continue;
+        }
+        if (controller.is_analog) {
+            audio_state.tone_hz = 256 + static_cast<int>(128.0f * controller.stick_avg_y);
+            state->x_offset += static_cast<int>(4.0f * controller.stick_avg_x);
+        } else {  // mkb
+            if (input_action(controller, Action::MoveLeft).ended_down) {
+                state->x_offset -= 1;
+            }
+            if (input_action(controller, Action::MoveRight).ended_down) {
+                state->x_offset += 1;
+            }
+        }
+
+        if (input_action(controller, Action::ActionUp).ended_down) {
+            state->y_offset += 1;
+        }
     }
 
     render_gradient(buffer, *state);

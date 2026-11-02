@@ -44,41 +44,50 @@ struct AudioState {
 // Always the first allocation in Storage::main.
 struct GameState {
     Arena permanent_arena;  // remainder of Storage::main after GameState
-    int green_offset;
-    int blue_offset;
+    int x_offset;
+    int y_offset;
 };
 static_assert(ArenaType<GameState>);
 
-struct ButtonState {
+struct ActionState {
     i32 half_transition_count;
     bool ended_down;
 };
 
+enum class Action : u8 {
+    ActionUp,
+    ActionDown,
+    ActionLeft,
+    ActionRight,
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    LeftShoulder,
+    RightShoulder,
+    Count,
+};
+
 struct ControllerInput {
     bool is_analog;
+    bool is_connected;
 
     // stick positions
-    f32 start_x;
-    f32 start_y;
-    f32 end_x;
-    f32 end_y;
-    f32 max_x;
-    f32 max_y;
-    f32 min_x;
-    f32 min_y;
+    f32 stick_avg_x;
+    f32 stick_avg_y;
 
-    union {
-        ButtonState buttons[6];
-        struct {
-            ButtonState u;
-            ButtonState d;
-            ButtonState l;
-            ButtonState r;
-            ButtonState ls;
-            ButtonState rs;
-        };
-    };
+    ActionState actions[static_cast<u8>(Action::Count)];
 };
+
+inline ActionState& input_action(ControllerInput& controller, Action a) {
+    assert(a < Action::Count);
+    return controller.actions[static_cast<u8>(a)];
+}
+
+inline const ActionState& input_action(const ControllerInput& controller, Action a) {
+    assert(a < Action::Count);
+    return controller.actions[static_cast<u8>(a)];
+}
 
 struct Input {
     ControllerInput controllers[k_max_controllers];
