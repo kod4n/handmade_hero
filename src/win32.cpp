@@ -1,48 +1,45 @@
+#define NOMINMAX
+
 #include "game.cpp"
-#include "game.h"
+#include "defer.h"
 
 #include <math.h>
 #include <windows.h>
 #include <xinput.h>
 #include <xaudio2.h>
 #include <strsafe.h>
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdarg>
-#include <vector>
+#include <utility>
 
 // constants
 // audio
 static constexpr u32 k_audio_channels = 2;
 static constexpr u32 k_audio_bits_per_channel_sample = 16;
 static constexpr u32 k_audio_bytes_per_frame = sizeof(i16) * k_audio_channels;
-static constexpr int k_audio_frames_per_buffer = 480;
-static constexpr u32 k_audio_buffer_size_bytes = k_audio_frames_per_buffer * k_audio_bytes_per_frame;
+static_assert(sizeof(AudioFrame) == k_audio_bytes_per_frame);
+static constexpr u32 k_audio_frames_per_buffer = 480;
 static constexpr u32 k_audio_buffer_count = 4;
 static constexpr u32 k_audio_queued_buffer_count = 3;
 static constexpr u32 k_sound_samples_per_second = 48000;
 
-// screen buffer
-static constexpr int k_bytes_per_pixel = 4;
-
 struct Win32OffscreenBuffer {
     BITMAPINFO bitmap_info;
-    void* memory;
-    int width;
-    int height;
-    int bytes_per_pixel;
-    int pitch;
+    std::span<u32> pixels;
+    i16 width;
+    i16 height;
 };
 
 struct Win32SoundOutput {
     u32 samples_per_second = k_sound_samples_per_second;
-    u32 buffer_size_bytes = k_audio_buffer_size_bytes;
     bool started = false;
     bool enabled = false;
 };
 
 struct Win32AudioBuffer {
-    std::vector<i16> samples;
+    std::array<AudioFrame, k_audio_frames_per_buffer> frames;
 };
 
 struct Win32Audio {
@@ -79,7 +76,7 @@ typedef X_INPUT_SET_STATE(x_input_set_state);
 X_INPUT_SET_STATE(xinput_set_state_stub) {
     return 0;
 }
-static x_input_set_state* xinput_set_state_ = &xinput_set_state_stub;
+[[maybe_unused]] static x_input_set_state* xinput_set_state_ = &xinput_set_state_stub;  // for rumble, not wired up yet
 #define XInputSetState xinput_set_state_
 
 static void win32_load_xinput() {
@@ -140,24 +137,20 @@ static void win32_log_hresult(const char* op, HRESULT hr) {
 enum class LogSeverity { Info, Warn, Error };
 
 static const char* log_severity(LogSeverity severity) {
-    const char* severity_str = "";
-
     switch (severity) {
-    case LogSeverity::Info:
-        severity_str = "info";
-        break;
-    case LogSeverity::Warn:
-        severity_str = "warn";
-        break;
-    case LogSeverity::Error:
-        severity_str = "error";
-        break;
+        using enum LogSeverity;
+    case Info:
+        return "info";
+    case Warn:
+        return "warn";
+    case Error:
+        return "error";
     }
-
-    return severity_str;
+    return "info";  // should not get here with exhaustive switch
 }
 
-static void win32_log(LogSeverity severity, const char* format, ...) {
+// format attribute: clang checks the arguments against the printf format string
+[[gnu::format(printf, 2, 3)]] static void win32_log(LogSeverity severity, const char* format, ...) {
     char buffer[1024];
     size_t prefix_length = 0;
     auto severity_str = log_severity(severity);
@@ -184,30 +177,34 @@ static void win32_log(LogSeverity severity, const char* format, ...) {
     }
 }
 
+#if DEV
 ReadFileResult dev_platform_read_file(const char* filename) {
     win32_log(LogSeverity::Info, "attempt file read for %s", filename);
     ReadFileResult result = {};
     HANDLE file = CreateFile(filename, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        LARGE_INTEGER file_size_res;
-        if (GetFileSizeEx(file, &file_size_res)) {
-            size_t file_size = static_cast<size_t>(file_size_res.QuadPart);
-            assert(file_size <= UINT32_MAX);
-            result.content = VirtualAlloc(nullptr, file_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-            if (result.content) {
-                DWORD bytes_read;
-                u32 file_size_32 = safe_truncate(file_size);
-                if (ReadFile(file, result.content, file_size_32, &bytes_read, nullptr) && file_size_32 == bytes_read) {
-                    result.size = file_size_32;
-                } else {
-                    dev_platform_free_file(result.content);
-                    result.content = nullptr;
-                }
-            }
-        }
-        CloseHandle(file);
-    } else {
+    if (file == INVALID_HANDLE_VALUE) {
         win32_log(LogSeverity::Warn, "failed to read file %s", filename);
+        return result;
+    }
+    defer(CloseHandle(file));
+
+    LARGE_INTEGER file_size_res;
+    if (!GetFileSizeEx(file, &file_size_res)) {
+        return result;
+    }
+
+    u32 file_size = safe_truncate(static_cast<u64>(file_size_res.QuadPart));
+    result.content = VirtualAlloc(nullptr, file_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!result.content) {
+        return result;
+    }
+
+    DWORD bytes_read;
+    if (ReadFile(file, result.content, file_size, &bytes_read, nullptr) && file_size == bytes_read) {
+        result.size = file_size;
+    } else {
+        dev_platform_free_file(result.content);
+        result.content = nullptr;
     }
     return result;
 }
@@ -219,17 +216,19 @@ void dev_platform_free_file(void* memory) {
 bool dev_platform_write_file(const char* filename, u32 size, void* memory) {
     bool result = false;
     HANDLE file = CreateFile(filename, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        DWORD bytes_written;
-        if (WriteFile(file, memory, size, &bytes_written, nullptr)) {
-            result = bytes_written == size;
-        }
-        CloseHandle(file);
-    } else {
+    if (file == INVALID_HANDLE_VALUE) {
         win32_log(LogSeverity::Warn, "failed to write file %s", filename);
+        return result;
+    }
+    defer(CloseHandle(file));
+
+    DWORD bytes_written;
+    if (WriteFile(file, memory, size, &bytes_written, nullptr)) {
+        result = bytes_written == size;
     }
     return result;
 }
+#endif
 
 static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {
     HRESULT hr = XAudio2Create(&global_audio.engine, 0, XAUDIO2_DEFAULT_PROCESSOR);
@@ -259,13 +258,6 @@ static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {
         return false;
     }
 
-    // Allocate every buffer before playback starts.
-    const u32 frame_count = sound_output.buffer_size_bytes / k_audio_bytes_per_frame;
-
-    for (Win32AudioBuffer& buffer : global_audio.buffers) {
-        buffer.samples.resize(frame_count * k_audio_channels);
-    }
-
     global_audio.next_buffer_idx = 0;
     sound_output.started = false;
 
@@ -280,15 +272,14 @@ static bool fill_sound_buffer(Win32SoundOutput& sound_output, AudioState& audio_
     Win32AudioBuffer& audio_buffer = global_audio.buffers[buffer_idx];
 
     AudioBuffer game_buffer = {
-        .samples = audio_buffer.samples.data(),
-        .sample_count = static_cast<u32>(audio_buffer.samples.size() / k_audio_channels),
+        .frames = audio_buffer.frames,
         .samples_per_second = sound_output.samples_per_second,
     };
     game_sound(game_buffer, audio_state);
 
     XAUDIO2_BUFFER buffer = {};
-    buffer.AudioBytes = static_cast<u32>(audio_buffer.samples.size() * sizeof(i16));
-    buffer.pAudioData = reinterpret_cast<const BYTE*>(audio_buffer.samples.data());
+    buffer.AudioBytes = static_cast<u32>(sizeof(audio_buffer.frames));
+    buffer.pAudioData = reinterpret_cast<const BYTE*>(audio_buffer.frames.data());
 
     // No END_OF_STREAM: this is a continuous stream.
     buffer.Flags = 0;
@@ -349,8 +340,8 @@ Win32WindowDim get_window_dim(HWND window) {
 }
 
 static void win32_resize_dib_section(Win32OffscreenBuffer* backbuffer, int w, int h) {
-    if (backbuffer->memory) {
-        VirtualFree(backbuffer->memory, 0, MEM_RELEASE);
+    if (backbuffer->pixels.data()) {
+        VirtualFree(backbuffer->pixels.data(), 0, MEM_RELEASE);
     }
 
     backbuffer->width = w;
@@ -361,15 +352,14 @@ static void win32_resize_dib_section(Win32OffscreenBuffer* backbuffer, int w, in
             .biWidth = backbuffer->width,
             .biHeight = -backbuffer->height,
             .biPlanes = 1,
-            .biBitCount = 32,
+            .biBitCount = 32,  // one u32 per pixel
             .biCompression = BI_RGB,
         }
     };
-    backbuffer->bytes_per_pixel = k_bytes_per_pixel;
-    backbuffer->pitch = w * k_bytes_per_pixel;
 
-    int bitmap_memory_size = w * h * k_bytes_per_pixel;
-    backbuffer->memory = VirtualAlloc(0, bitmap_memory_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    size_t pixel_count = static_cast<size_t>(w) * static_cast<size_t>(h);
+    void* memory = VirtualAlloc(nullptr, pixel_count * sizeof(u32), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    backbuffer->pixels = {static_cast<u32*>(memory), memory ? pixel_count : 0};
 }
 
 static void win32_display_window_buffer(
@@ -388,7 +378,7 @@ static void win32_display_window_buffer(
         0,
         backbuffer.width,
         backbuffer.height,
-        backbuffer.memory,
+        backbuffer.pixels.data(),
         &backbuffer.bitmap_info,
         DIB_RGB_COLORS,
         SRCCOPY
@@ -478,7 +468,12 @@ static f32 win32_normalize_xinput_stick(i16 raw_value) {
     return static_cast<f32>(raw_value) / divisor;
 }
 
-int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd_line, int n_cmd_show) {
+int CALLBACK WinMain(
+    HINSTANCE h_instance,
+    [[maybe_unused]] HINSTANCE h_prev_instance,
+    [[maybe_unused]] LPSTR lp_cmd_line,
+    [[maybe_unused]] int n_cmd_show
+) {
     LARGE_INTEGER perf_freq_res;
     QueryPerformanceFrequency(&perf_freq_res);
     i64 perf_freq = perf_freq_res.QuadPart;
@@ -523,14 +518,14 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
             QueryPerformanceCounter(&last_counter);
 
 #if DEV
-            LPVOID base_address = reinterpret_cast<LPVOID>(size_tb(2));
+            LPVOID base_address = reinterpret_cast<LPVOID>(2_TB);
 #else
-            LPVOID base_address = reinterpret_cast<LPVOID>(0);
+            LPVOID base_address = nullptr;
 #endif
 
             Storage storage = {
-                .main_size = size_mb(64),
-                .transient_size = size_gb(4),
+                .main_size = 64_MB,
+                .transient_size = 4_GB,
             };
             u64 total_storage_size = storage.main_size + storage.transient_size;
             storage.main = VirtualAlloc(base_address, total_storage_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -542,8 +537,8 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
             }
 
             Input input[2] = {};
-            Input curr_input = input[0];
-            Input prev_input = input[1];
+            Input* curr_input = &input[0];
+            Input* prev_input = &input[1];
 
             while (running) {
                 MSG message;
@@ -555,24 +550,20 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                     DispatchMessage(&message);
                 }
 
-                int max_controllers = XUSER_MAX_COUNT;
-                int input_controller_count = ARRAYSIZE(curr_input.controllers);
-                if (max_controllers > input_controller_count) {
-                    max_controllers = input_controller_count;
-                }
+                constexpr DWORD max_controllers = std::min<DWORD>(XUSER_MAX_COUNT, k_max_controllers);
 
                 for (DWORD idx = 0; idx < max_controllers; idx++) {
-                    ControllerInput* new_input = &curr_input.controllers[idx];
-                    ControllerInput* old_input = &prev_input.controllers[idx];
+                    ControllerInput* new_input = &curr_input->controllers[idx];
+                    ControllerInput* old_input = &prev_input->controllers[idx];
 
                     XINPUT_STATE controller_state;
                     if (XInputGetState(idx, &controller_state) == ERROR_SUCCESS) {
                         XINPUT_GAMEPAD* pad = &controller_state.Gamepad;
                         new_input->is_analog = true;
-                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_A, new_input->u, old_input->u);
-                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_B, new_input->d, old_input->d);
-                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_X, new_input->l, old_input->l);
-                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_Y, new_input->r, old_input->r);
+                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_A, old_input->u, new_input->u);
+                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_B, old_input->d, new_input->d);
+                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_X, old_input->l, new_input->l);
+                        win32_process_xinput_button(pad->wButtons, XINPUT_GAMEPAD_Y, old_input->r, new_input->r);
 
                         f32 stick_x = win32_normalize_xinput_stick(pad->sThumbLX);
                         f32 stick_y = win32_normalize_xinput_stick(pad->sThumbLY);
@@ -584,12 +575,12 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                 }
 
                 ScreenBuffer offscreen_buffer = {
-                    .memory = global_backbuffer.memory,
-                    .width = global_backbuffer.width,
-                    .height = global_backbuffer.height,
-                    .pitch = global_backbuffer.pitch,
+                    .pixels = global_backbuffer.pixels,
+                    .width = static_cast<u32>(global_backbuffer.width),
+                    .height = static_cast<u32>(global_backbuffer.height),
+                    .pitch = static_cast<u32>(global_backbuffer.width),
                 };
-                game_render(storage, offscreen_buffer, curr_input, audio_state);
+                game_render(storage, offscreen_buffer, *curr_input, audio_state);
                 process_audio(sound_output, audio_state);
 
                 HDC device_ctx = GetDC(window_handle);
@@ -613,9 +604,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_c
                 last_counter = end_counter;
                 last_cycle_count = end_cycle_count;
 
-                Input tmp_input = curr_input;
-                curr_input = prev_input;
-                prev_input = tmp_input;
+                std::swap(curr_input, prev_input);
             }
         } else {
             // TODO logging

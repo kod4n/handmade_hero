@@ -1,9 +1,13 @@
 #pragma once
 
 #include "types.h"
+#include "arena.h"
 #include <cassert>
+#include <numbers>
+#include <span>
 
-static constexpr f32 k_pi = 3.141592653459f;
+inline constexpr f32 k_pi = std::numbers::pi_v<f32>;
+inline constexpr u32 k_max_controllers = 4;
 
 struct Storage {
     bool is_initialized;
@@ -14,15 +18,20 @@ struct Storage {
 };
 
 struct ScreenBuffer {
-    void* memory;
-    int width;
-    int height;
-    int pitch;
+    std::span<u32> pixels;  // 0xAARRGGBB, top-down rows
+    u32 width;
+    u32 height;
+    u32 pitch;  // pixels per row
+};
+
+// One interleaved stereo frame.
+struct AudioFrame {
+    i16 left;
+    i16 right;
 };
 
 struct AudioBuffer {
-    i16* samples;
-    u32 sample_count;
+    std::span<AudioFrame> frames;
     u32 samples_per_second;
 };
 
@@ -32,10 +41,13 @@ struct AudioState {
     f32 tone_volume = 500.0f;
 };
 
+// Always the first allocation in Storage::main.
 struct GameState {
+    Arena permanent_arena;  // remainder of Storage::main after GameState
     int green_offset;
     int blue_offset;
 };
+static_assert(ArenaType<GameState>);
 
 struct ButtonState {
     i32 half_transition_count;
@@ -69,27 +81,12 @@ struct ControllerInput {
 };
 
 struct Input {
-    ControllerInput controllers[4];
+    ControllerInput controllers[k_max_controllers];
 };
 
-static void game_sound(AudioBuffer& buffer, AudioState& state);
+void game_sound(AudioBuffer& buffer, AudioState& state);
 
-static void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state);
-
-static constexpr u32 k_kilobyte = 1024;
-
-static u64 size_kb(u8 amount) {
-    return amount * k_kilobyte;
-}
-static u64 size_mb(u8 amount) {
-    return size_kb(amount) * k_kilobyte;
-}
-static u64 size_gb(u8 amount) {
-    return size_mb(amount) * k_kilobyte;
-}
-static u64 size_tb(u8 amount) {
-    return size_gb(amount) * k_kilobyte;
-}
+void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state);
 
 inline u32 safe_truncate(u64 value) {
     assert(value <= UINT32_MAX);

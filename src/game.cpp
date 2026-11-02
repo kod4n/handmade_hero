@@ -6,44 +6,44 @@ static u32 pack_color(u8 r, u8 g, u8 b, u8 a = 0) {
 }
 
 static void render_gradient(ScreenBuffer& buffer, GameState& state) {
-    u8* row = static_cast<u8*>(buffer.memory);
-    for (int y = 0; y < buffer.height; y++) {
-        u32* pixel = reinterpret_cast<u32*>(row);
-        for (int x = 0; x < buffer.width; x++) {
-            u8 r = 0;
-            auto g = static_cast<u8>(y + state.green_offset);
+    u8 r = 0;
+    for (u32 y = 0; y < buffer.height; y++) {
+        std::span<u32> row = buffer.pixels.subspan(y * buffer.pitch, buffer.width);
+        auto g = static_cast<u8>(y + state.green_offset);
+        for (u32 x = 0; x < buffer.width; x++) {
             auto b = static_cast<u8>(x + state.blue_offset);
-            *pixel++ = pack_color(r, g, b);
+            row[x] = pack_color(r, g, b);
         }
-        row += buffer.pitch;
     }
 }
 
-static void game_sound(AudioBuffer& audio, AudioState& state) {
+void game_sound(AudioBuffer& audio, AudioState& state) {
     const f32 phase_step = 2.0f * k_pi * state.tone_hz / static_cast<f32>(audio.samples_per_second);
 
-    i16* sample_out = audio.samples;
-    for (u32 frame = 0; frame < audio.sample_count; ++frame) {
+    for (AudioFrame& frame : audio.frames) {
         f32 sine = sinf(state.t_sine);
         i16 sample = static_cast<i16>(sine * state.tone_volume);
-        *sample_out++ = sample;
-        *sample_out++ = sample;
-        state.t_sine += phase_step;
-    }
+        frame = {.left = sample, .right = sample};
 
-    if (state.t_sine >= 2.0f * k_pi) {
-        state.t_sine -= 2.0f * k_pi;
+        // Wrap per frame: one buffer can advance the phase by several periods.
+        state.t_sine += phase_step;
+        if (state.t_sine >= 2.0f * k_pi) {
+            state.t_sine -= 2.0f * k_pi;
+        }
     }
 }
 
-static void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state) {
-    GameState* state = static_cast<GameState*>(storage.main);
+void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state) {
     if (!storage.is_initialized) {
+        Arena arena = arena_make(storage.main, storage.main_size);
+        GameState* state = arena_push<GameState>(arena);
+        state->permanent_arena = arena;
         state->green_offset = 0;
         state->blue_offset = 0;
 
         storage.is_initialized = true;
     }
+    GameState* state = static_cast<GameState*>(storage.main);
 
     ControllerInput* controller = &input.controllers[0];
     if (controller->is_analog) {  // controller
