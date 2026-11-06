@@ -9,7 +9,7 @@ REM set CXX_FLAGS=/std:c++20 -DDEV -Wall -Wextra -Wpedantic -Wconversion -Wsign-
 REM missing-designated-field-initializers: Win32 structs have many fields that are meant to stay zero
 REM _MSVC_STL_HARDENING_SPAN: bounds-check std::span indexing/subspan in dev builds
 set CXX_FLAGS=/std:c++20 -DDEV -D_MSVC_STL_HARDENING_SPAN=1 -W4 -Werror -GR- -EHa- -Oi -Wno-missing-designated-field-initializers -FC -Zi
-set LIBS=user32.lib gdi32.lib
+set LIBS=user32.lib gdi32.lib winmm.lib
 for %%I in (..\src\win32.cpp) do set SOURCE=%%~fI
 
 %CXX% %CXX_FLAGS% "%SOURCE%" %LIBS%

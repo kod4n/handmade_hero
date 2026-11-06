@@ -14,16 +14,26 @@
 #include <cstdarg>
 #include <utility>
 
-// constants
-// audio
+// render constants
+static constexpr u32 k_monitor_refresh_hz = 60;
+static constexpr u32 k_game_refresh_hz = k_monitor_refresh_hz;
+
+// audio constants
 static constexpr u32 k_audio_channels = 2;
 static constexpr u32 k_audio_bits_per_channel_sample = 16;
 static constexpr u32 k_audio_bytes_per_frame = sizeof(i16) * k_audio_channels;
 static_assert(sizeof(AudioFrame) == k_audio_bytes_per_frame);
-static constexpr u32 k_audio_frames_per_buffer = 480;
-static constexpr u32 k_audio_buffer_count = 4;
-static constexpr u32 k_audio_queued_buffer_count = 3;
 static constexpr u32 k_sound_samples_per_second = 48000;
+static constexpr u32 k_audio_frames_per_buffer = 480;
+// Audio is only topped up once per game frame, so the queue must outlast a frame
+// plus scheduler jitter. Keep ~2 game frames queued to avoid underruns.
+static constexpr u32 k_audio_frames_per_game_frame = k_sound_samples_per_second / k_game_refresh_hz;
+static constexpr u32 k_audio_queued_buffer_count =
+    (2 * k_audio_frames_per_game_frame + k_audio_frames_per_buffer - 1) / k_audio_frames_per_buffer;
+// +1 so the buffer being refilled is never one XAudio2 still reads from.
+static constexpr u32 k_audio_buffer_count = k_audio_queued_buffer_count + 1;
+
+static u64 perf_count_freq;
 
 struct Win32OffscreenBuffer {
     BITMAPINFO bitmap_info;
@@ -497,6 +507,17 @@ LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPAR
     return result;
 }
 
+inline LARGE_INTEGER win32_wall_clock() {
+    LARGE_INTEGER result;
+    QueryPerformanceCounter(&result);
+    return result;
+}
+
+inline f32 win32_seconds_elapsed(LARGE_INTEGER start, LARGE_INTEGER end) {
+    f32 elapsed = static_cast<f32>(end.QuadPart - start.QuadPart) / static_cast<f32>(perf_count_freq);
+    return elapsed;
+}
+
 int CALLBACK WinMain(
     HINSTANCE h_instance,
     [[maybe_unused]] HINSTANCE h_prev_instance,
@@ -505,7 +526,11 @@ int CALLBACK WinMain(
 ) {
     LARGE_INTEGER perf_freq_res;
     QueryPerformanceFrequency(&perf_freq_res);
-    i64 perf_freq = perf_freq_res.QuadPart;
+    perf_count_freq = perf_freq_res.QuadPart;
+
+    UINT desired_sched_ms = 1;
+    bool sched_is_granular = timeBeginPeriod(desired_sched_ms) == TIMERR_NOERROR;
+    win32_log(LogSeverity::Info, "scheduler is granular? %s\n", sched_is_granular ? "true" : "false");
 
     WNDCLASS window_class = {
         .style = CS_HREDRAW | CS_VREDRAW,
@@ -542,10 +567,6 @@ int CALLBACK WinMain(
                 running = false;
             }
 
-            u64 last_cycle_count = __rdtsc();
-            LARGE_INTEGER last_counter;
-            QueryPerformanceCounter(&last_counter);
-
 #if DEV
             LPVOID base_address = reinterpret_cast<LPVOID>(2_TB);
 #else
@@ -564,6 +585,11 @@ int CALLBACK WinMain(
                 win32_log(LogSeverity::Error, "failed to allocate main game storage");
                 return 1;
             }
+
+            u64 last_cycle_count = __rdtsc();
+            LARGE_INTEGER last_counter = win32_wall_clock();
+
+            f32 target_seconds_per_frame = 1.0f / static_cast<f32>(k_game_refresh_hz);
 
             Input input[2] = {};
             Input* curr_input = &input[0];
@@ -705,21 +731,40 @@ int CALLBACK WinMain(
                 win32_display_window_buffer(device_ctx, global_backbuffer, window_dim.width, window_dim.height);
                 ReleaseDC(window_handle, device_ctx);
 
-                u64 end_cycle_count = __rdtsc();
-                LARGE_INTEGER end_counter;
-                QueryPerformanceCounter(&end_counter);
+                LARGE_INTEGER work_counter = win32_wall_clock();
+                f32 frame_seconds = win32_seconds_elapsed(last_counter, work_counter);
+                f32 frame_wait = frame_seconds;
+                if (frame_seconds < target_seconds_per_frame) {
+                    while (frame_wait < target_seconds_per_frame) {
+                        if (sched_is_granular) {
+                            DWORD sleep_ms = static_cast<DWORD>(1000.0f * (target_seconds_per_frame - frame_wait));
+                            if (sleep_ms > 0) {
+                                Sleep(sleep_ms);
+                            }
+                        }
+                        frame_wait = win32_seconds_elapsed(last_counter, win32_wall_clock());
+                    }
+                } else {
+                    win32_log(
+                        LogSeverity::Warn,
+                        "frame rate [%.02f] missed target frame rate [%.02f]\n",
+                        frame_seconds,
+                        target_seconds_per_frame
+                    );
+                }
 
+                LARGE_INTEGER end_counter = win32_wall_clock();
+                f32 ms_per_frame = 1000.0f * win32_seconds_elapsed(last_counter, end_counter);
+                last_counter = end_counter;
+
+                u64 end_cycle_count = __rdtsc();
                 i64 cycles_elapsed = end_cycle_count - last_cycle_count;
-                i64 counter_elapsed = end_counter.QuadPart - last_counter.QuadPart;
-                f32 ms_per_frame =
-                    static_cast<f32>(1000.0f * static_cast<f32>(counter_elapsed) / static_cast<f32>(perf_freq));
-                f32 fps = static_cast<f32>(static_cast<f32>(perf_freq) / static_cast<f32>(counter_elapsed));
+                last_cycle_count = end_cycle_count;
+                f32 fps = 0.0f;
+                // static_cast<f32>(static_cast<f32>(perf_count_freq) / static_cast<f32>(counter_elapsed));
                 f32 mcpf = static_cast<f32>(static_cast<f32>(cycles_elapsed) / (1000.0f * 1000.0f));
 
                 win32_log(LogSeverity::Info, "%.02fms/f | %.02ffps | %.02fmcpf\n", ms_per_frame, fps, mcpf);
-
-                last_counter = end_counter;
-                last_cycle_count = end_cycle_count;
 
                 std::swap(curr_input, prev_input);
             }
