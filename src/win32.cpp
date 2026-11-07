@@ -14,6 +14,8 @@
 #include <cstdarg>
 #include <utility>
 
+using namespace HH;
+
 // render constants
 static constexpr u32 k_monitor_refresh_hz = 60;
 static constexpr u32 k_game_refresh_hz = k_monitor_refresh_hz;
@@ -211,6 +213,7 @@ static const char* log_severity(LogSeverity severity) {
 }
 
 #if DEV
+namespace HH {
 ReadFileResult dev_platform_read_file(const char* filename) {
     win32_log(LogSeverity::Info, "attempt file read for %s", filename);
     ReadFileResult result = {};
@@ -261,6 +264,7 @@ bool dev_platform_write_file(const char* filename, u32 size, void* memory) {
     }
     return result;
 }
+}  // namespace HH
 #endif
 
 static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {

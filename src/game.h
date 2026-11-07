@@ -6,6 +6,8 @@
 #include <numbers>
 #include <span>
 
+namespace HH {
+
 inline constexpr f32 k_pi = std::numbers::pi_v<f32>;
 inline constexpr u32 k_max_controllers = 4;
 
@@ -112,3 +114,4 @@ ReadFileResult dev_platform_read_file(const char* filename);
 void dev_platform_free_file(void* memory);
 bool dev_platform_write_file(const char* filename, u32 size, void* memory);
 #endif
+}  // namespace HH

@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="$ROOT_DIR/build"
+SRC_DIR="$ROOT_DIR/src"
+
+CXX="${CXX:-clang++}"
+OUTPUT="hh_macos"
+
+# Mirrors build.bat:
+#   -DDEV                                    dev-only code paths (file I/O, fixed base address)
+#   _LIBCPP_HARDENING_MODE                   bounds-check std::span indexing/subspan in dev builds
+#   -fno-rtti -fno-exceptions                same as -GR- -EHa-
+#   missing-designated-field-initializers    OS structs have many fields that are meant to stay zero
+CXX_FLAGS="-std=c++20 -DDEV -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG \
+-g -O0 -Wall -Wextra -Werror -fno-rtti -fno-exceptions \
+-Wno-missing-designated-field-initializers"
+OBJCXX_FLAGS="-fobjc-arc"
+FRAMEWORKS="-framework Cocoa -framework AudioToolbox -framework GameController"
+
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+
+# -MJ makes clang write a compile_commands.json fragment for each translation unit.
+# shellcheck disable=SC2086
+"$CXX" $CXX_FLAGS -MJ macos_handmade.json -c "$SRC_DIR/macos_handmade.cpp" -o macos_handmade.o
+# shellcheck disable=SC2086
+"$CXX" $CXX_FLAGS $OBJCXX_FLAGS -MJ macos_window.json -c "$SRC_DIR/macos_window.mm" -o macos_window.o
+# shellcheck disable=SC2086
+"$CXX" macos_handmade.o macos_window.o $FRAMEWORKS -o "$OUTPUT"
+
+# Generate compile_commands.json for clangd. Each fragment ends in ",", so
+# drop the trailing comma from the last one to keep the array valid JSON.
+{
+    echo "["
+    cat macos_handmade.json macos_window.json | sed '$ s/,$//'
+    echo "]"
+} > "$ROOT_DIR/compile_commands.json"
+
+printf 'Built %s\n' "$BUILD_DIR/$OUTPUT"

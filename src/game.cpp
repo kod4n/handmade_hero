@@ -1,6 +1,8 @@
 #include "math.h"
 #include "game.h"
 
+namespace HH {
+
 static u32 pack_color(u8 r, u8 g, u8 b, u8 a = 0) {
     return (static_cast<u32>(a) << 24 | static_cast<u32>(r) << 16 | static_cast<u32>(g) << 8 | static_cast<u32>(b));
 }
@@ -68,3 +70,5 @@ void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioStat
 
     render_gradient(buffer, *state);
 }
+
+};  // namespace HH

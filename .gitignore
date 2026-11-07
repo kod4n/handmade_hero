@@ -69,3 +69,6 @@ Testing/
 
 # debugging
 .vscode/
+
+# mac
+.DS_Store
