@@ -1,4 +1,3 @@
-#include "game.cpp"
 #include "defer.h"
 #include "game.h"
 
@@ -213,8 +212,11 @@ static const char* log_severity(LogSeverity severity) {
 }
 
 #if DEV
-namespace HH {
-ReadFileResult dev_platform_read_file(const char* filename) {
+static void dev_platform_free_file(void* memory) {
+    VirtualFree(memory, 0, MEM_RELEASE);
+}
+
+static ReadFileResult dev_platform_read_file(const char* filename) {
     win32_log(LogSeverity::Info, "attempt file read for %s", filename);
     ReadFileResult result = {};
     HANDLE file = CreateFile(filename, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -245,11 +247,7 @@ ReadFileResult dev_platform_read_file(const char* filename) {
     return result;
 }
 
-void dev_platform_free_file(void* memory) {
-    VirtualFree(memory, 0, MEM_RELEASE);
-}
-
-bool dev_platform_write_file(const char* filename, u32 size, void* memory) {
+static bool dev_platform_write_file(const char* filename, u32 size, void* memory) {
     bool result = false;
     HANDLE file = CreateFile(filename, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
@@ -264,8 +262,102 @@ bool dev_platform_write_file(const char* filename, u32 size, void* memory) {
     }
     return result;
 }
-}  // namespace HH
 #endif
+
+// Game code loading
+//
+// The game lives in game.dll. We load a *copy* of it (game_temp.dll) so the
+// original stays unlocked and the compiler can overwrite it while we run.
+// Each frame we compare game.dll's write time against the one we loaded and
+// reload on change. All game memory lives in Storage (owned here), so game
+// state survives the swap; only statics inside the DLL are reset.
+
+struct Win32GameCode {
+    HMODULE dll;
+    FILETIME dll_last_write_time;
+    GameRender* render;
+    GameSound* sound;
+};
+
+struct Win32GameCodePaths {
+    char source_dll[MAX_PATH];
+    char temp_dll[MAX_PATH];
+    char lock[MAX_PATH];  // exists while build.bat is writing game.dll
+};
+
+static void game_render_stub(Storage&, ScreenBuffer&, Input&, AudioState&) {}
+
+static void game_sound_stub(AudioBuffer& buffer, AudioState&) {
+    // Silence rather than replaying whatever was left in the buffer.
+    for (AudioFrame& frame : buffer.frames) {
+        frame = {};
+    }
+}
+
+static FILETIME win32_get_last_write_time(const char* filename) {
+    FILETIME result = {};
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (GetFileAttributesEx(filename, GetFileExInfoStandard, &data)) {
+        result = data.ftLastWriteTime;
+    }
+    return result;
+}
+
+static bool win32_file_exists(const char* filename) {
+    return GetFileAttributes(filename) != INVALID_FILE_ATTRIBUTES;
+}
+
+// Paths are built from the exe's directory, so it doesn't matter what the
+// working directory is when the game is launched.
+static Win32GameCodePaths win32_get_game_code_paths() {
+    Win32GameCodePaths paths = {};
+    char exe_dir[MAX_PATH] = {};
+    DWORD length = GetModuleFileName(nullptr, exe_dir, sizeof(exe_dir));
+    // Truncate after the last backslash, keeping it.
+    for (DWORD i = length; i > 0; i--) {
+        if (exe_dir[i - 1] == '\\') {
+            exe_dir[i] = '\0';
+            break;
+        }
+    }
+    StringCchPrintfA(paths.source_dll, MAX_PATH, "%sgame.dll", exe_dir);
+    StringCchPrintfA(paths.temp_dll, MAX_PATH, "%sgame_temp.dll", exe_dir);
+    StringCchPrintfA(paths.lock, MAX_PATH, "%slock.tmp", exe_dir);
+    return paths;
+}
+
+static Win32GameCode win32_load_game_code(const Win32GameCodePaths& paths) {
+    Win32GameCode result = {};
+    FILETIME write_time = win32_get_last_write_time(paths.source_dll);
+
+    if (CopyFile(paths.source_dll, paths.temp_dll, FALSE)) {
+        result.dll = LoadLibrary(paths.temp_dll);
+    }
+    if (result.dll) {
+        result.render = reinterpret_cast<GameRender*>(GetProcAddress(result.dll, "game_render"));
+        result.sound = reinterpret_cast<GameSound*>(GetProcAddress(result.dll, "game_sound"));
+    }
+
+    if (result.render && result.sound) {
+        // Only record the write time on success, so a failed load retries next frame.
+        result.dll_last_write_time = write_time;
+        win32_log(LogSeverity::Info, "loaded game code\n");
+    } else {
+        win32_log(LogSeverity::Warn, "failed to load game code, using stubs\n");
+        result.render = game_render_stub;
+        result.sound = game_sound_stub;
+    }
+    return result;
+}
+
+static void win32_unload_game_code(Win32GameCode& game_code) {
+    if (game_code.dll) {
+        FreeLibrary(game_code.dll);
+    }
+    game_code = {};
+    game_code.render = game_render_stub;
+    game_code.sound = game_sound_stub;
+}
 
 static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {
     HRESULT hr = XAudio2Create(&global_audio.engine, 0, XAUDIO2_DEFAULT_PROCESSOR);
@@ -301,7 +393,12 @@ static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {
     return true;
 }
 
-static bool fill_sound_buffer(Win32SoundOutput& sound_output, AudioState& audio_state, u32 buffer_idx) {
+static bool fill_sound_buffer(
+    GameSound* game_sound,
+    Win32SoundOutput& sound_output,
+    AudioState& audio_state,
+    u32 buffer_idx
+) {
     if (buffer_idx >= k_audio_buffer_count || !global_audio.source_voice) {
         return false;
     }
@@ -331,7 +428,7 @@ static bool fill_sound_buffer(Win32SoundOutput& sound_output, AudioState& audio_
     return true;
 }
 
-static bool process_audio(Win32SoundOutput& sound_output, AudioState& audio_state) {
+static bool process_audio(GameSound* game_sound, Win32SoundOutput& sound_output, AudioState& audio_state) {
     if (!global_audio.source_voice || !sound_output.enabled) {
         return false;
     }
@@ -342,7 +439,7 @@ static bool process_audio(Win32SoundOutput& sound_output, AudioState& audio_stat
     while (state.BuffersQueued < k_audio_queued_buffer_count) {
         const u32 buffer_idx = global_audio.next_buffer_idx;
 
-        if (!fill_sound_buffer(sound_output, audio_state, buffer_idx)) {
+        if (!fill_sound_buffer(game_sound, sound_output, audio_state, buffer_idx)) {
             return false;
         }
 
@@ -589,6 +686,14 @@ int CALLBACK WinMain(
                 win32_log(LogSeverity::Error, "failed to allocate main game storage");
                 return 1;
             }
+#if DEV
+            storage.dev_read_file = dev_platform_read_file;
+            storage.dev_free_file = dev_platform_free_file;
+            storage.dev_write_file = dev_platform_write_file;
+#endif
+
+            const Win32GameCodePaths game_code_paths = win32_get_game_code_paths();
+            Win32GameCode game_code = win32_load_game_code(game_code_paths);
 
             u64 last_cycle_count = __rdtsc();
             LARGE_INTEGER last_counter = win32_wall_clock();
@@ -600,6 +705,14 @@ int CALLBACK WinMain(
             Input* prev_input = &input[1];
 
             while (running) {
+                // Hot reload: swap in the new DLL once the build has finished writing it.
+                FILETIME dll_write_time = win32_get_last_write_time(game_code_paths.source_dll);
+                if (CompareFileTime(&dll_write_time, &game_code.dll_last_write_time) != 0
+                    && !win32_file_exists(game_code_paths.lock)) {
+                    win32_unload_game_code(game_code);
+                    game_code = win32_load_game_code(game_code_paths);
+                }
+
                 ControllerInput* kb = &curr_input->controllers[0];
                 ControllerInput* prev_kb = &prev_input->controllers[0];
                 *kb = {};
@@ -727,8 +840,8 @@ int CALLBACK WinMain(
                     .height = static_cast<u32>(global_backbuffer.height),
                     .pitch = static_cast<u32>(global_backbuffer.width),
                 };
-                game_render(storage, offscreen_buffer, *curr_input, audio_state);
-                process_audio(sound_output, audio_state);
+                game_code.render(storage, offscreen_buffer, *curr_input, audio_state);
+                process_audio(game_code.sound, sound_output, audio_state);
 
                 HDC device_ctx = GetDC(window_handle);
                 Win32WindowDim window_dim = get_window_dim(window_handle);

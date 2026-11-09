@@ -294,6 +294,11 @@ int main() {
     }
     defer(macos_free(storage.main, total_storage_size));
     storage.transient = static_cast<u8*>(storage.main) + storage.main_size;
+#if DEV
+    storage.dev_read_file = dev_platform_read_file;
+    storage.dev_free_file = dev_platform_free_file;
+    storage.dev_write_file = dev_platform_write_file;
+#endif
 
     const f32 target_seconds_per_frame = 1.0f / static_cast<f32>(k_game_refresh_hz);
     u64 last_counter = macos_wall_clock();

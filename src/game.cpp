@@ -1,6 +1,8 @@
 #include "math.h"
 #include "game.h"
 
+#include <type_traits>
+
 namespace HH {
 
 static u32 pack_color(u8 r, u8 g, u8 b, u8 a = 0) {
@@ -19,7 +21,7 @@ static void render_gradient(ScreenBuffer& buffer, GameState& state) {
     }
 }
 
-void game_sound(AudioBuffer& audio, AudioState& state) {
+extern "C" void game_sound(AudioBuffer& audio, AudioState& state) {
     const f32 phase_step = 2.0f * k_pi * state.tone_hz / static_cast<f32>(audio.samples_per_second);
 
     for (AudioFrame& frame : audio.frames) {
@@ -35,7 +37,7 @@ void game_sound(AudioBuffer& audio, AudioState& state) {
     }
 }
 
-void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state) {
+extern "C" void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state) {
     if (!storage.is_initialized) {
         Arena arena = arena_make(storage.main, storage.main_size);
         GameState* state = arena_push<GameState>(arena);
@@ -71,4 +73,9 @@ void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioStat
     render_gradient(buffer, *state);
 }
 
-};  // namespace HH
+// Catch signature drift between the exported functions and the types the
+// platform casts GetProcAddress results to.
+static_assert(std::is_same_v<decltype(game_sound), GameSound>);
+static_assert(std::is_same_v<decltype(game_render), GameRender>);
+
+}  // namespace HH

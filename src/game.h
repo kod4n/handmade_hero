@@ -11,12 +11,32 @@ namespace HH {
 inline constexpr f32 k_pi = std::numbers::pi_v<f32>;
 inline constexpr u32 k_max_controllers = 4;
 
+#if DEV
+struct ReadFileResult {
+    u32 size;
+    void* content;
+};
+
+// Platform services the game calls. The game lives in its own DLL on Windows,
+// so it can't link against platform functions directly; they're passed in here.
+using DevPlatformReadFile = ReadFileResult(const char* filename);
+using DevPlatformFreeFile = void(void* memory);
+using DevPlatformWriteFile = bool(const char* filename, u32 size, void* memory);
+#endif
+
+// Owned by the platform layer, so it survives game code reloads.
 struct Storage {
     bool is_initialized;
     u64 main_size;
     void* main;
     u64 transient_size;
     void* transient;
+
+#if DEV
+    DevPlatformReadFile* dev_read_file;
+    DevPlatformFreeFile* dev_free_file;
+    DevPlatformWriteFile* dev_write_file;
+#endif
 };
 
 struct ScreenBuffer {
@@ -95,23 +115,14 @@ struct Input {
     ControllerInput controllers[k_max_controllers];
 };
 
-void game_sound(AudioBuffer& buffer, AudioState& state);
-
-void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state);
+// Game entry points. On Windows they're exported from game.dll with C linkage
+// (unmangled names) and looked up with GetProcAddress, so the platform only
+// ever refers to them through these function types.
+using GameSound = void(AudioBuffer& buffer, AudioState& state);
+using GameRender = void(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state);
 
 inline u32 safe_truncate(u64 value) {
     assert(value <= UINT32_MAX);
     return static_cast<u32>(value);
 }
-
-#if DEV
-struct ReadFileResult {
-    u32 size;
-    void* content;
-};
-
-ReadFileResult dev_platform_read_file(const char* filename);
-void dev_platform_free_file(void* memory);
-bool dev_platform_write_file(const char* filename, u32 size, void* memory);
-#endif
 }  // namespace HH
