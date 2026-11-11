@@ -1,6 +1,7 @@
 #include "math.h"
 #include "game.h"
 
+#include <algorithm>
 #include <type_traits>
 
 namespace HH {
@@ -17,6 +18,23 @@ static void render_gradient(ScreenBuffer& buffer, GameState& state) {
         for (u32 x = 0; x < buffer.width; x++) {
             auto b = static_cast<u8>(x + state.x_offset);
             row[x] = pack_color(r, g, b);
+        }
+    }
+}
+
+// Fills [x_min, x_max) x [y_min, y_max), clipped to the buffer.
+static void render_rect(ScreenBuffer& buffer, int x_min, int y_min, int x_max, int y_max, u32 color) {
+    const int width = static_cast<int>(buffer.width);
+    const int height = static_cast<int>(buffer.height);
+    x_min = std::clamp(x_min, 0, width);
+    x_max = std::clamp(x_max, 0, width);
+    y_min = std::clamp(y_min, 0, height);
+    y_max = std::clamp(y_max, 0, height);
+
+    for (int y = y_min; y < y_max; y++) {
+        std::span<u32> row = buffer.pixels.subspan(static_cast<u32>(y) * buffer.pitch, buffer.width);
+        for (int x = x_min; x < x_max; x++) {
+            row[static_cast<u32>(x)] = color;
         }
     }
 }
@@ -44,6 +62,8 @@ extern "C" void game_render(Storage& storage, ScreenBuffer& buffer, Input& input
         state->permanent_arena = arena;
         state->x_offset = 0;
         state->y_offset = 0;
+        state->player_x = 100;
+        state->player_y = 100;
 
         storage.is_initialized = true;
     }
@@ -53,15 +73,29 @@ extern "C" void game_render(Storage& storage, ScreenBuffer& buffer, Input& input
         if (!controller.is_connected) {
             continue;
         }
+        constexpr f32 player_speed = 4.0f;  // pixels per frame
         if (controller.is_analog) {
             audio_state.tone_hz = 256 + static_cast<int>(128.0f * controller.stick_avg_y);
             state->x_offset += static_cast<int>(4.0f * controller.stick_avg_x);
+
+            // Stick y is up-positive, the screen is top-down.
+            state->player_x += static_cast<int>(player_speed * controller.stick_avg_x);
+            state->player_y -= static_cast<int>(player_speed * controller.stick_avg_y);
         } else {  // mkb
+            constexpr int step = static_cast<int>(player_speed);
             if (input_action(controller, Action::MoveLeft).ended_down) {
                 state->x_offset -= 1;
+                state->player_x -= step;
             }
             if (input_action(controller, Action::MoveRight).ended_down) {
                 state->x_offset += 1;
+                state->player_x += step;
+            }
+            if (input_action(controller, Action::MoveUp).ended_down) {
+                state->player_y -= step;
+            }
+            if (input_action(controller, Action::MoveDown).ended_down) {
+                state->player_y += step;
             }
         }
 
@@ -71,6 +105,16 @@ extern "C" void game_render(Storage& storage, ScreenBuffer& buffer, Input& input
     }
 
     render_gradient(buffer, *state);
+
+    constexpr int player_size = 10;
+    render_rect(
+        buffer,
+        state->player_x,
+        state->player_y,
+        state->player_x + player_size,
+        state->player_y + player_size,
+        pack_color(255, 255, 255)
+    );
 }
 
 // Catch signature drift between the exported functions and the types the

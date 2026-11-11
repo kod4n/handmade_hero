@@ -68,6 +68,8 @@ struct GameState {
     Arena permanent_arena;  // remainder of Storage::main after GameState
     int x_offset;
     int y_offset;
+    int player_x;  // top-left corner, in pixels
+    int player_y;
 };
 static_assert(ArenaType<GameState>);
 

@@ -46,7 +46,7 @@ struct Win32OffscreenBuffer {
 struct Win32SoundOutput {
     u32 samples_per_second = k_sound_samples_per_second;
     bool started = false;
-    bool enabled = true;
+    bool enabled = false;
 };
 
 struct Win32AudioBuffer {
@@ -309,10 +309,8 @@ static bool win32_file_exists(const char* filename) {
 
 // Paths are built from the exe's directory, so it doesn't matter what the
 // working directory is when the game is launched.
-static Win32GameCodePaths win32_get_game_code_paths() {
-    Win32GameCodePaths paths = {};
-    char exe_dir[MAX_PATH] = {};
-    DWORD length = GetModuleFileName(nullptr, exe_dir, sizeof(exe_dir));
+static void win32_get_exe_dir(char (&exe_dir)[MAX_PATH]) {
+    DWORD length = GetModuleFileName(nullptr, exe_dir, MAX_PATH);
     // Truncate after the last backslash, keeping it.
     for (DWORD i = length; i > 0; i--) {
         if (exe_dir[i - 1] == '\\') {
@@ -320,6 +318,10 @@ static Win32GameCodePaths win32_get_game_code_paths() {
             break;
         }
     }
+}
+
+static Win32GameCodePaths win32_get_game_code_paths(const char* exe_dir) {
+    Win32GameCodePaths paths = {};
     StringCchPrintfA(paths.source_dll, MAX_PATH, "%sgame.dll", exe_dir);
     StringCchPrintfA(paths.temp_dll, MAX_PATH, "%sgame_temp.dll", exe_dir);
     StringCchPrintfA(paths.lock, MAX_PATH, "%slock.tmp", exe_dir);
@@ -357,6 +359,248 @@ static void win32_unload_game_code(Win32GameCode& game_code) {
     game_code = {};
     game_code.render = game_render_stub;
     game_code.sound = game_sound_stub;
+}
+
+// Looped live code editing
+//
+// Press L to start recording: game memory is snapshotted to a file, then each
+// frame's input is appended after it. Press L again to stop recording and loop
+// playback: the snapshot is restored and the recorded input is fed back in,
+// rewinding to the snapshot whenever it runs out. With hot reload this keeps a
+// moment of gameplay repeating while the code that runs it is edited. Press L
+// during playback to stop.
+//
+// Only Storage::main is snapshotted. Transient storage is scratch, and at 4 GB
+// too big to write out on every recording.
+struct Win32State {
+    void* game_memory;
+    u64 game_memory_size;
+
+    HANDLE recording_handle;
+    u32 recording_idx;  // 0 = not recording
+    u32 recorded_frame_count;
+    HANDLE playback_handle;
+    u32 playback_idx;        // 0 = not playing back
+    u32 playback_frame_idx;  // frames played since the last rewind
+    u32 playback_frame_count;
+
+    char exe_dir[MAX_PATH];
+};
+
+static void win32_get_input_file_path(const Win32State& state, u32 slot_idx, char (&path)[MAX_PATH]) {
+    StringCchPrintfA(path, MAX_PATH, "%sloop_edit_%u.hmi", state.exe_dir, slot_idx);
+}
+
+static void win32_begin_recording_input(Win32State& state, u32 slot_idx) {
+    char path[MAX_PATH];
+    win32_get_input_file_path(state, slot_idx, path);
+    HANDLE file = CreateFile(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        win32_log(LogSeverity::Warn, "failed to open %s for recording\n", path);
+        return;
+    }
+
+    u32 size = safe_truncate(state.game_memory_size);
+    DWORD bytes_written;
+    if (!WriteFile(file, state.game_memory, size, &bytes_written, nullptr) || bytes_written != size) {
+        win32_log(LogSeverity::Warn, "failed to snapshot game memory to %s\n", path);
+        CloseHandle(file);
+        return;
+    }
+
+    state.recording_handle = file;
+    state.recording_idx = slot_idx;
+    state.recorded_frame_count = 0;
+    win32_log(LogSeverity::Info, "recording input to %s\n", path);
+}
+
+static void win32_end_recording_input(Win32State& state) {
+    CloseHandle(state.recording_handle);
+    state.recording_handle = nullptr;
+    state.recording_idx = 0;
+    win32_log(LogSeverity::Info, "stopped recording input after %u frames\n", state.recorded_frame_count);
+}
+
+static void win32_begin_input_playback(Win32State& state, u32 slot_idx) {
+    char path[MAX_PATH];
+    win32_get_input_file_path(state, slot_idx, path);
+    HANDLE file = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        win32_log(LogSeverity::Warn, "failed to open %s for playback\n", path);
+        return;
+    }
+
+    u32 size = safe_truncate(state.game_memory_size);
+    DWORD bytes_read;
+    if (!ReadFile(file, state.game_memory, size, &bytes_read, nullptr) || bytes_read != size) {
+        win32_log(LogSeverity::Warn, "failed to restore game memory from %s\n", path);
+        CloseHandle(file);
+        return;
+    }
+
+    // Whatever follows the snapshot is one Input per recorded frame.
+    LARGE_INTEGER file_size;
+    u64 input_bytes = 0;
+    if (GetFileSizeEx(file, &file_size)) {
+        input_bytes = static_cast<u64>(file_size.QuadPart) - state.game_memory_size;
+    }
+
+    state.playback_handle = file;
+    state.playback_idx = slot_idx;
+    state.playback_frame_idx = 0;
+    state.playback_frame_count = safe_truncate(input_bytes / sizeof(Input));
+}
+
+static void win32_end_input_playback(Win32State& state) {
+    CloseHandle(state.playback_handle);
+    state.playback_handle = nullptr;
+    state.playback_idx = 0;
+}
+
+static void win32_record_input(Win32State& state, const Input& input) {
+    DWORD bytes_written;
+    if (!WriteFile(state.recording_handle, &input, sizeof(input), &bytes_written, nullptr)
+        || bytes_written != sizeof(input)) {
+        win32_log(LogSeverity::Warn, "failed to record input, stopping recording\n");
+        win32_end_recording_input(state);
+        return;
+    }
+    state.recorded_frame_count++;
+}
+
+// Returns false if there is nothing to play back, which ends playback.
+static bool win32_read_recorded_input(Win32State& state, Input& input) {
+    DWORD bytes_read;
+    if (!ReadFile(state.playback_handle, &input, sizeof(input), &bytes_read, nullptr) || bytes_read != sizeof(input)) {
+        return false;
+    }
+    state.playback_frame_idx++;
+    return true;
+}
+
+static void win32_playback_input(Win32State& state, Input& input) {
+    if (win32_read_recorded_input(state, input)) {
+        return;
+    }
+
+    // Out of input: rewind by restoring the snapshot and starting over.
+    u32 slot_idx = state.playback_idx;
+    win32_end_input_playback(state);
+    win32_begin_input_playback(state, slot_idx);
+    if (state.playback_idx == 0 || !win32_read_recorded_input(state, input)) {
+        // Still nothing, e.g. a recording with no frames in it.
+        win32_log(LogSeverity::Warn, "no recorded input to play back\n");
+        if (state.playback_idx != 0) {
+            win32_end_input_playback(state);
+        }
+    }
+}
+
+enum class LoopMode { Off, Recording, Playback };
+
+static LoopMode win32_loop_mode(const Win32State& state) {
+    if (state.playback_idx != 0) {
+        return LoopMode::Playback;
+    }
+    if (state.recording_idx != 0) {
+        return LoopMode::Recording;
+    }
+    return LoopMode::Off;
+}
+
+static const char* win32_window_title(LoopMode mode) {
+    switch (mode) {
+        using enum LoopMode;
+    case Off:
+        return "Handmade Hero";
+    case Recording:
+        return "Handmade Hero [recording loop]";
+    case Playback:
+        return "Handmade Hero [looping playback]";
+    }
+    return "Handmade Hero";  // should not get here with exhaustive switch
+}
+
+// Fills [x_min, x_max) x [y_min, y_max), clipped to the backbuffer. The game has its own
+// version, but it lives in game.dll, so the platform can't call it.
+static void win32_fill_rect(Win32OffscreenBuffer& backbuffer, int x_min, int y_min, int x_max, int y_max, u32 color) {
+    x_min = std::clamp(x_min, 0, static_cast<int>(backbuffer.width));
+    x_max = std::clamp(x_max, 0, static_cast<int>(backbuffer.width));
+    y_min = std::clamp(y_min, 0, static_cast<int>(backbuffer.height));
+    y_max = std::clamp(y_max, 0, static_cast<int>(backbuffer.height));
+
+    const size_t pitch = static_cast<size_t>(backbuffer.width);
+    for (int y = y_min; y < y_max; y++) {
+        std::span<u32> row = backbuffer.pixels.subspan(static_cast<size_t>(y) * pitch, pitch);
+        for (int x = x_min; x < x_max; x++) {
+            row[static_cast<size_t>(x)] = color;
+        }
+    }
+}
+
+// Drawn over the game's frame: a badge in the top-left corner (red while
+// recording, green while playing back), and during playback a bar along the
+// top edge showing how far through the loop we are.
+static void win32_draw_loop_overlay(Win32OffscreenBuffer& backbuffer, const Win32State& state) {
+    constexpr int badge_margin = 8;
+    constexpr int badge_size = 16;
+    constexpr int bar_height = 4;
+    constexpr u32 recording_color = 0x00FF2020;
+    constexpr u32 playback_color = 0x0020FF20;
+    constexpr u32 bar_track_color = 0x00202020;
+
+    switch (win32_loop_mode(state)) {
+        using enum LoopMode;
+    case Off: {
+    } break;
+
+    case Recording: {
+        // Blink about once a second so it reads as "live".
+        if ((state.recorded_frame_count / (k_game_refresh_hz / 2)) % 2 == 0) {
+            win32_fill_rect(
+                backbuffer,
+                badge_margin,
+                badge_margin,
+                badge_margin + badge_size,
+                badge_margin + badge_size,
+                recording_color
+            );
+        }
+    } break;
+
+    case Playback: {
+        win32_fill_rect(
+            backbuffer,
+            badge_margin,
+            badge_margin,
+            badge_margin + badge_size,
+            badge_margin + badge_size,
+            playback_color
+        );
+
+        win32_fill_rect(backbuffer, 0, 0, backbuffer.width, bar_height, bar_track_color);
+        if (state.playback_frame_count > 0) {
+            u64 progress = static_cast<u64>(backbuffer.width) * state.playback_frame_idx;
+            int bar_width = static_cast<int>(progress / state.playback_frame_count);
+            win32_fill_rect(backbuffer, 0, 0, bar_width, bar_height, playback_color);
+        }
+    } break;
+    }
+}
+
+static void win32_toggle_input_loop(Win32State& state) {
+    if (state.playback_idx != 0) {
+        win32_end_input_playback(state);
+        win32_log(LogSeverity::Info, "stopped input playback\n");
+    } else if (state.recording_idx == 0) {
+        win32_begin_recording_input(state, 1);
+    } else {
+        win32_end_recording_input(state);
+        win32_begin_input_playback(state, 1);
+        if (state.playback_idx != 0) {
+            win32_log(LogSeverity::Info, "looping input playback\n");
+        }
+    }
 }
 
 static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {
@@ -519,7 +763,7 @@ static void win32_display_window_buffer(
     );
 }
 
-static void win32_process_message(ControllerInput& kb) {
+static void win32_process_message(ControllerInput& kb, Win32State& state) {
     MSG msg = {};
     while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
         switch (msg.message) {
@@ -565,6 +809,12 @@ static void win32_process_message(ControllerInput& kb) {
             case 'E': {
                 win32_process_kb_button(input_action(kb, Action::RightShoulder), is_down);
             } break;
+
+            case 'L': {
+                if (is_down) {
+                    win32_toggle_input_loop(state);
+                }
+            } break;
             }
         } break;
         default: {
@@ -572,7 +822,6 @@ static void win32_process_message(ControllerInput& kb) {
             DispatchMessage(&msg);
         } break;
         }
-        break;
     }
 }
 
@@ -692,7 +941,13 @@ int CALLBACK WinMain(
             storage.dev_write_file = dev_platform_write_file;
 #endif
 
-            const Win32GameCodePaths game_code_paths = win32_get_game_code_paths();
+            Win32State win32_state = {
+                .game_memory = storage.main,
+                .game_memory_size = storage.main_size,
+            };
+            win32_get_exe_dir(win32_state.exe_dir);
+
+            const Win32GameCodePaths game_code_paths = win32_get_game_code_paths(win32_state.exe_dir);
             Win32GameCode game_code = win32_load_game_code(game_code_paths);
 
             u64 last_cycle_count = __rdtsc();
@@ -703,6 +958,10 @@ int CALLBACK WinMain(
             Input input[2] = {};
             Input* curr_input = &input[0];
             Input* prev_input = &input[1];
+            // Played back input goes here rather than over curr_input, so the
+            // live keyboard state is still accurate once playback stops.
+            Input playback_input = {};
+            LoopMode last_loop_mode = LoopMode::Off;
 
             while (running) {
                 // Hot reload: swap in the new DLL once the build has finished writing it.
@@ -720,7 +979,7 @@ int CALLBACK WinMain(
                 for (u8 i = 0; i < ARRAYSIZE(kb->actions); i++) {
                     kb->actions[i].ended_down = prev_kb->actions[i].ended_down;
                 }
-                win32_process_message(*kb);
+                win32_process_message(*kb, win32_state);
 
                 constexpr DWORD max_controllers = std::min<DWORD>(XUSER_MAX_COUNT, k_max_controllers);
 
@@ -840,8 +1099,27 @@ int CALLBACK WinMain(
                     .height = static_cast<u32>(global_backbuffer.height),
                     .pitch = static_cast<u32>(global_backbuffer.width),
                 };
-                game_code.render(storage, offscreen_buffer, *curr_input, audio_state);
+
+                Input* game_input = curr_input;
+                if (win32_state.recording_idx != 0) {
+                    win32_record_input(win32_state, *curr_input);
+                }
+                if (win32_state.playback_idx != 0) {
+                    win32_playback_input(win32_state, playback_input);
+                    if (win32_state.playback_idx != 0) {
+                        game_input = &playback_input;
+                    }
+                }
+
+                game_code.render(storage, offscreen_buffer, *game_input, audio_state);
                 process_audio(game_code.sound, sound_output, audio_state);
+
+                win32_draw_loop_overlay(global_backbuffer, win32_state);
+                LoopMode loop_mode = win32_loop_mode(win32_state);
+                if (loop_mode != last_loop_mode) {
+                    SetWindowText(window_handle, win32_window_title(loop_mode));
+                    last_loop_mode = loop_mode;
+                }
 
                 HDC device_ctx = GetDC(window_handle);
                 Win32WindowDim window_dim = get_window_dim(window_handle);
