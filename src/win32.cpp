@@ -107,13 +107,8 @@ static void win32_process_kb_button(ActionState& state, bool is_down) {
     state.half_transition_count++;
 }
 
-static void win32_process_xinput_button(
-    DWORD button_state,
-    DWORD button_bit,
-    ActionState& old_state,
-    ActionState& new_state
-) {
-    new_state.ended_down = (button_state & button_bit) == button_bit;
+static void win32_process_digital_button(bool is_down, const ActionState& old_state, ActionState& new_state) {
+    new_state.ended_down = is_down;
     new_state.half_transition_count = (old_state.ended_down != new_state.ended_down) ? 1 : 0;
 }
 
@@ -363,18 +358,32 @@ static void win32_unload_game_code(Win32GameCode& game_code) {
 
 // Looped live code editing
 //
-// Press L to start recording: game memory is snapshotted to a file, then each
-// frame's input is appended after it. Press L again to stop recording and loop
+// Press L to start recording: game memory is snapshotted, then each frame's
+// input is appended to a file. Press L again to stop recording and loop
 // playback: the snapshot is restored and the recorded input is fed back in,
 // rewinding to the snapshot whenever it runs out. With hot reload this keeps a
 // moment of gameplay repeating while the code that runs it is edited. Press L
 // during playback to stop.
 //
+// The snapshot lives in a memory-mapped file (loop_edit_N_state.hmi), so
+// taking or restoring it is a memcpy rather than a synchronous file write or
+// read; the OS flushes it to disk in the background. Input goes to
+// loop_edit_N_input.hmi.
+//
 // Only Storage::main is snapshotted. Transient storage is scratch, and at 4 GB
-// too big to write out on every recording.
+// too big to copy on every rewind.
+static constexpr u32 k_replay_slot_count = 4;  // slots are numbered from 1; 0 means none
+
+struct Win32ReplayBuffer {
+    HANDLE state_file;
+    HANDLE memory_map;
+    void* snapshot;  // Storage::main as it was when recording began; null until first used
+};
+
 struct Win32State {
     void* game_memory;
     u64 game_memory_size;
+    Win32ReplayBuffer replay_buffers[k_replay_slot_count];
 
     HANDLE recording_handle;
     u32 recording_idx;  // 0 = not recording
@@ -387,26 +396,69 @@ struct Win32State {
     char exe_dir[MAX_PATH];
 };
 
-static void win32_get_input_file_path(const Win32State& state, u32 slot_idx, char (&path)[MAX_PATH]) {
-    StringCchPrintfA(path, MAX_PATH, "%sloop_edit_%u.hmi", state.exe_dir, slot_idx);
+static void win32_get_replay_path(const Win32State& state, u32 slot_idx, const char* kind, char (&path)[MAX_PATH]) {
+    StringCchPrintfA(path, MAX_PATH, "%sloop_edit_%u_%s.hmi", state.exe_dir, slot_idx, kind);
+}
+
+static Win32ReplayBuffer& win32_get_replay_buffer(Win32State& state, u32 slot_idx) {
+    assert(slot_idx > 0 && slot_idx <= k_replay_slot_count);
+    return state.replay_buffers[slot_idx - 1];
+}
+
+// Maps the slot's snapshot file the first time the slot is recorded into. The
+// mapping is kept for the rest of the run, so later recordings reuse it.
+static void* win32_map_replay_snapshot(Win32State& state, u32 slot_idx) {
+    Win32ReplayBuffer& buffer = win32_get_replay_buffer(state, slot_idx);
+    if (buffer.snapshot) {
+        return buffer.snapshot;
+    }
+
+    char path[MAX_PATH];
+    win32_get_replay_path(state, slot_idx, "state", path);
+    HANDLE file = CreateFile(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        win32_log(LogSeverity::Warn, "failed to create replay snapshot %s\n", path);
+        return nullptr;
+    }
+
+    const u64 size = state.game_memory_size;
+    HANDLE memory_map = CreateFileMapping(
+        file,
+        nullptr,
+        PAGE_READWRITE,
+        static_cast<DWORD>(size >> 32),
+        static_cast<DWORD>(size & 0xFFFFFFFF),
+        nullptr
+    );
+    void* snapshot = memory_map ? MapViewOfFile(memory_map, FILE_MAP_ALL_ACCESS, 0, 0, size) : nullptr;
+    if (!snapshot) {
+        win32_log(LogSeverity::Warn, "failed to map replay snapshot %s\n", path);
+        if (memory_map) {
+            CloseHandle(memory_map);
+        }
+        CloseHandle(file);
+        return nullptr;
+    }
+
+    buffer = {.state_file = file, .memory_map = memory_map, .snapshot = snapshot};
+    return snapshot;
 }
 
 static void win32_begin_recording_input(Win32State& state, u32 slot_idx) {
+    void* snapshot = win32_map_replay_snapshot(state, slot_idx);
+    if (!snapshot) {
+        return;
+    }
+
     char path[MAX_PATH];
-    win32_get_input_file_path(state, slot_idx, path);
+    win32_get_replay_path(state, slot_idx, "input", path);
     HANDLE file = CreateFile(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         win32_log(LogSeverity::Warn, "failed to open %s for recording\n", path);
         return;
     }
 
-    u32 size = safe_truncate(state.game_memory_size);
-    DWORD bytes_written;
-    if (!WriteFile(file, state.game_memory, size, &bytes_written, nullptr) || bytes_written != size) {
-        win32_log(LogSeverity::Warn, "failed to snapshot game memory to %s\n", path);
-        CloseHandle(file);
-        return;
-    }
+    memcpy(snapshot, state.game_memory, state.game_memory_size);
 
     state.recording_handle = file;
     state.recording_idx = slot_idx;
@@ -421,34 +473,36 @@ static void win32_end_recording_input(Win32State& state) {
     win32_log(LogSeverity::Info, "stopped recording input after %u frames\n", state.recorded_frame_count);
 }
 
+// Restores the snapshot and seeks back to the first recorded frame.
+static void win32_rewind_input_playback(Win32State& state) {
+    const Win32ReplayBuffer& buffer = win32_get_replay_buffer(state, state.playback_idx);
+    memcpy(state.game_memory, buffer.snapshot, state.game_memory_size);
+    SetFilePointerEx(state.playback_handle, LARGE_INTEGER{}, nullptr, FILE_BEGIN);
+    state.playback_frame_idx = 0;
+}
+
 static void win32_begin_input_playback(Win32State& state, u32 slot_idx) {
+    if (!win32_get_replay_buffer(state, slot_idx).snapshot) {
+        win32_log(LogSeverity::Warn, "nothing recorded in loop slot %u\n", slot_idx);
+        return;
+    }
+
     char path[MAX_PATH];
-    win32_get_input_file_path(state, slot_idx, path);
+    win32_get_replay_path(state, slot_idx, "input", path);
     HANDLE file = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         win32_log(LogSeverity::Warn, "failed to open %s for playback\n", path);
         return;
     }
 
-    u32 size = safe_truncate(state.game_memory_size);
-    DWORD bytes_read;
-    if (!ReadFile(file, state.game_memory, size, &bytes_read, nullptr) || bytes_read != size) {
-        win32_log(LogSeverity::Warn, "failed to restore game memory from %s\n", path);
-        CloseHandle(file);
-        return;
-    }
-
-    // Whatever follows the snapshot is one Input per recorded frame.
+    // The file is one Input per recorded frame.
     LARGE_INTEGER file_size;
-    u64 input_bytes = 0;
-    if (GetFileSizeEx(file, &file_size)) {
-        input_bytes = static_cast<u64>(file_size.QuadPart) - state.game_memory_size;
-    }
+    u64 input_bytes = GetFileSizeEx(file, &file_size) ? static_cast<u64>(file_size.QuadPart) : 0;
 
     state.playback_handle = file;
     state.playback_idx = slot_idx;
-    state.playback_frame_idx = 0;
     state.playback_frame_count = safe_truncate(input_bytes / sizeof(Input));
+    win32_rewind_input_playback(state);
 }
 
 static void win32_end_input_playback(Win32State& state) {
@@ -483,16 +537,12 @@ static void win32_playback_input(Win32State& state, Input& input) {
         return;
     }
 
-    // Out of input: rewind by restoring the snapshot and starting over.
-    u32 slot_idx = state.playback_idx;
-    win32_end_input_playback(state);
-    win32_begin_input_playback(state, slot_idx);
-    if (state.playback_idx == 0 || !win32_read_recorded_input(state, input)) {
+    // Out of input: rewind to the snapshot and start over.
+    win32_rewind_input_playback(state);
+    if (!win32_read_recorded_input(state, input)) {
         // Still nothing, e.g. a recording with no frames in it.
         win32_log(LogSeverity::Warn, "no recorded input to play back\n");
-        if (state.playback_idx != 0) {
-            win32_end_input_playback(state);
-        }
+        win32_end_input_playback(state);
     }
 }
 
@@ -604,7 +654,18 @@ static void win32_toggle_input_loop(Win32State& state) {
 }
 
 static bool win32_init_xaudio2(Win32SoundOutput& sound_output) {
-    HRESULT hr = XAudio2Create(&global_audio.engine, 0, XAUDIO2_DEFAULT_PROCESSOR);
+    // XAudio2 is a COM API and needs COM initialized on this thread. Without it
+    // CreateMasteringVoice fails with CO_E_NOTINITIALIZED. That only shows up
+    // sometimes, because something else in the process may already have
+    // initialized COM (it does when launched from a shell, not from neovim).
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // RPC_E_CHANGED_MODE: already initialized in another mode, which still works.
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        win32_log_hresult("initializing COM", hr);
+        return false;
+    }
+
+    hr = XAudio2Create(&global_audio.engine, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(hr)) {
         win32_log_hresult("creating XAudio2 engine", hr);
         return false;
@@ -707,7 +768,7 @@ static bool process_audio(GameSound* game_sound, Win32SoundOutput& sound_output,
     return true;
 }
 
-Win32WindowDim get_window_dim(HWND window) {
+static Win32WindowDim win32_get_window_dim(HWND window) {
     RECT rect;
     GetClientRect(window, &rect);
     Win32WindowDim result = {
@@ -740,22 +801,34 @@ static void win32_resize_dib_section(Win32OffscreenBuffer* backbuffer, int w, in
     backbuffer->pixels = {static_cast<u32*>(memory), memory ? pixel_count : 0};
 }
 
-static void win32_display_window_buffer(
+// Blits 1:1 instead of stretching to the window, so every pixel on screen is
+// exactly one the game wrote. Any part of the window the buffer doesn't cover
+// is cleared to black.
+static void win32_display_buffer_in_window(
     HDC device_ctx,
-    Win32OffscreenBuffer backbuffer,
+    const Win32OffscreenBuffer& backbuffer,
     int window_width,
     int window_height
 ) {
+    const int width = backbuffer.width;
+    const int height = backbuffer.height;
+    if (window_width > width) {
+        PatBlt(device_ctx, width, 0, window_width - width, window_height, BLACKNESS);
+    }
+    if (window_height > height) {
+        PatBlt(device_ctx, 0, height, width, window_height - height, BLACKNESS);
+    }
+
     StretchDIBits(
         device_ctx,
         0,
         0,
-        window_width,
-        window_height,
+        width,
+        height,
         0,
         0,
-        backbuffer.width,
-        backbuffer.height,
+        width,
+        height,
         backbuffer.pixels.data(),
         &backbuffer.bitmap_info,
         DIB_RGB_COLORS,
@@ -829,30 +902,40 @@ LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPAR
     LRESULT result = 0;
     switch (message) {
     case WM_ACTIVATEAPP: {
-        OutputDebugStringA("WM_ACTIVATEAPP\n");
-        break;
-    }
+#if DEV
+        // The dev window is topmost so it can sit over the editor while live
+        // coding. Fade it out while another app has focus so the editor shows
+        // through.
+        const BYTE alpha = w_param ? 255 : 64;
+        SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA);
+#endif
+    } break;
+
+    case WM_CLOSE:
     case WM_DESTROY: {
-        OutputDebugStringA("WM_DESTROY\n");
         running = false;
-        break;
-    }
-    case WM_CLOSE: {
-        OutputDebugStringA("WM_CLOSE\n");
-        running = false;
-        break;
-    }
+    } break;
+
+    case WM_PAINT: {
+        // The main loop blits every frame, but it doesn't run while Windows is
+        // in a modal move/resize loop, so repaint here too.
+        PAINTSTRUCT paint;
+        HDC device_ctx = BeginPaint(window, &paint);
+        Win32WindowDim dim = win32_get_window_dim(window);
+        win32_display_buffer_in_window(device_ctx, global_backbuffer, dim.width, dim.height);
+        EndPaint(window, &paint);
+    } break;
+
     case WM_SYSKEYDOWN:
     case WM_SYSKEYUP:
     case WM_KEYDOWN:
     case WM_KEYUP: {
-        assert(!"no keyboard messages");
-        break;
-    }
+        assert(!"keyboard messages are handled in win32_process_message");
+    } break;
+
     default: {
         result = DefWindowProc(window, message, w_param, l_param);
-        break;
-    }
+    } break;
     }
     return result;
 }
@@ -868,6 +951,79 @@ inline f32 win32_seconds_elapsed(LARGE_INTEGER start, LARGE_INTEGER end) {
     return elapsed;
 }
 
+// controllers[0] is the keyboard, so gamepad N fills controllers[N + 1].
+static void win32_poll_gamepads(Input& curr_input, const Input& prev_input) {
+    constexpr DWORD max_gamepads = std::min<DWORD>(XUSER_MAX_COUNT, k_max_controllers - 1);
+    constexpr f32 move_threshold = 0.5f;
+
+    struct ButtonMapping {
+        WORD bit;
+        Action action;
+    };
+    constexpr ButtonMapping button_mappings[] = {
+        {XINPUT_GAMEPAD_Y, Action::ActionUp},
+        {XINPUT_GAMEPAD_A, Action::ActionDown},
+        {XINPUT_GAMEPAD_X, Action::ActionLeft},
+        {XINPUT_GAMEPAD_B, Action::ActionRight},
+        {XINPUT_GAMEPAD_LEFT_SHOULDER, Action::LeftShoulder},
+        {XINPUT_GAMEPAD_RIGHT_SHOULDER, Action::RightShoulder},
+    };
+
+    for (DWORD idx = 0; idx < max_gamepads; idx++) {
+        ControllerInput& new_input = curr_input.controllers[idx + 1];
+        const ControllerInput& old_input = prev_input.controllers[idx + 1];
+
+        XINPUT_STATE controller_state;
+        if (XInputGetState(idx, &controller_state) != ERROR_SUCCESS) {
+            new_input.is_connected = false;
+            continue;
+        }
+        const XINPUT_GAMEPAD& pad = controller_state.Gamepad;
+        new_input.is_connected = true;
+        new_input.is_analog = old_input.is_analog;
+
+        // stick
+        new_input.stick_avg_x = win32_normalize_xinput_stick(pad.sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+        new_input.stick_avg_y = win32_normalize_xinput_stick(pad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+
+        // dpad, overrides the stick when used
+        if (pad.wButtons & XINPUT_GAMEPAD_DPAD_UP) {
+            new_input.is_analog = false;
+            new_input.stick_avg_y = 1.0f;
+        }
+        if (pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) {
+            new_input.is_analog = false;
+            new_input.stick_avg_y = -1.0f;
+        }
+        if (pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) {
+            new_input.is_analog = false;
+            new_input.stick_avg_x = 1.0f;
+        }
+        if (pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) {
+            new_input.is_analog = false;
+            new_input.stick_avg_x = -1.0f;
+        }
+
+        // Stick pushed past the threshold also counts as a move button.
+        auto process_stick_move = [&](bool is_down, Action action) {
+            win32_process_digital_button(is_down, input_action(old_input, action), input_action(new_input, action));
+        };
+        process_stick_move(new_input.stick_avg_x < -move_threshold, Action::MoveLeft);
+        process_stick_move(new_input.stick_avg_x > move_threshold, Action::MoveRight);
+        process_stick_move(new_input.stick_avg_y < -move_threshold, Action::MoveDown);
+        process_stick_move(new_input.stick_avg_y > move_threshold, Action::MoveUp);
+
+        // buttons
+        for (const ButtonMapping& mapping : button_mappings) {
+            win32_process_digital_button(
+                (pad.wButtons & mapping.bit) != 0,
+                input_action(old_input, mapping.action),
+                input_action(new_input, mapping.action)
+            );
+        }
+    }
+}
+
 int CALLBACK WinMain(
     HINSTANCE h_instance,
     [[maybe_unused]] HINSTANCE h_prev_instance,
@@ -878,295 +1034,201 @@ int CALLBACK WinMain(
     QueryPerformanceFrequency(&perf_freq_res);
     perf_count_freq = perf_freq_res.QuadPart;
 
-    UINT desired_sched_ms = 1;
-    bool sched_is_granular = timeBeginPeriod(desired_sched_ms) == TIMERR_NOERROR;
+    // 1ms scheduler granularity, so the Sleep() in the frame wait is accurate.
+    constexpr UINT desired_sched_ms = 1;
+    const bool sched_is_granular = timeBeginPeriod(desired_sched_ms) == TIMERR_NOERROR;
+    defer(if (sched_is_granular) { timeEndPeriod(desired_sched_ms); });
     win32_log(LogSeverity::Info, "scheduler is granular? %s\n", sched_is_granular ? "true" : "false");
-
-    WNDCLASS window_class = {
-        .style = CS_HREDRAW | CS_VREDRAW,
-        .lpfnWndProc = window_callback,
-        .hInstance = h_instance,
-        .lpszClassName = "HandmadeHeroWindowClass",
-    };
 
     win32_resize_dib_section(&global_backbuffer, 1280, 720);
 
-    if (RegisterClass(&window_class)) {
-        HWND window_handle = CreateWindowEx(
-            0,
-            window_class.lpszClassName,
-            "Handmade Hero",
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            0,
-            0,
-            h_instance,
-            0
-        );
-        if (window_handle) {
-            running = true;
-            win32_load_xinput();
-
-            Win32SoundOutput sound_output = {};
-            AudioState audio_state = {};
-            if (!win32_init_xaudio2(sound_output)) {
-                win32_log(LogSeverity::Error, "failed to init XAudio2\n");
-                running = false;
-            }
+    WNDCLASS window_class = {
+        // CS_OWNDC: the window keeps one DC for its whole life, so it's fetched once below.
+        .style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW,
+        .lpfnWndProc = window_callback,
+        .hInstance = h_instance,
+        .hCursor = LoadCursor(nullptr, IDC_ARROW),
+        .lpszClassName = "HandmadeHeroWindowClass",
+    };
+    if (!RegisterClass(&window_class)) {
+        win32_log(LogSeverity::Error, "failed to register window class\n");
+        return 1;
+    }
 
 #if DEV
-            LPVOID base_address = reinterpret_cast<LPVOID>(2_TB);
+    // Topmost and layered so it can sit over the editor while live coding; see WM_ACTIVATEAPP.
+    constexpr DWORD window_ex_style = WS_EX_TOPMOST | WS_EX_LAYERED;
 #else
-            LPVOID base_address = nullptr;
+    constexpr DWORD window_ex_style = 0;
 #endif
+    constexpr DWORD window_style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
 
-            Storage storage = {
-                .main_size = 64_MB,
-                .transient_size = 4_GB,
-            };
-            u64 total_storage_size = storage.main_size + storage.transient_size;
-            storage.main = VirtualAlloc(base_address, total_storage_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-            storage.transient = static_cast<u8*>(storage.main) + storage.main_size;
+    // Size the window so its client area exactly fits the backbuffer.
+    RECT window_rect = {0, 0, global_backbuffer.width, global_backbuffer.height};
+    AdjustWindowRectEx(&window_rect, window_style, FALSE, window_ex_style);
 
-            if (!storage.main) {
-                win32_log(LogSeverity::Error, "failed to allocate main game storage");
-                return 1;
-            }
+    HWND window = CreateWindowEx(
+        window_ex_style,
+        window_class.lpszClassName,
+        win32_window_title(LoopMode::Off),
+        window_style,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        window_rect.right - window_rect.left,
+        window_rect.bottom - window_rect.top,
+        nullptr,
+        nullptr,
+        h_instance,
+        nullptr
+    );
+    if (!window) {
+        win32_log(LogSeverity::Error, "failed to create window\n");
+        return 1;
+    }
 #if DEV
-            storage.dev_read_file = dev_platform_read_file;
-            storage.dev_free_file = dev_platform_free_file;
-            storage.dev_write_file = dev_platform_write_file;
+    // A layered window isn't drawn at all until its attributes are set.
+    SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
+#endif
+    HDC device_ctx = GetDC(window);
+
+    win32_load_xinput();
+
+    Win32SoundOutput sound_output = {};
+    AudioState audio_state = {};
+    if (!win32_init_xaudio2(sound_output)) {
+        win32_log(LogSeverity::Error, "failed to init XAudio2\n");
+        return 1;
+    }
+
+#if DEV
+    LPVOID base_address = reinterpret_cast<LPVOID>(2_TB);
+#else
+    LPVOID base_address = nullptr;
 #endif
 
-            Win32State win32_state = {
-                .game_memory = storage.main,
-                .game_memory_size = storage.main_size,
-            };
-            win32_get_exe_dir(win32_state.exe_dir);
+    Storage storage = {
+        .main_size = 64_MB,
+        .transient_size = 1_GB,
+    };
+    u64 total_storage_size = storage.main_size + storage.transient_size;
+    storage.main = VirtualAlloc(base_address, total_storage_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!storage.main) {
+        win32_log(LogSeverity::Error, "failed to allocate game storage\n");
+        return 1;
+    }
+    storage.transient = static_cast<u8*>(storage.main) + storage.main_size;
+#if DEV
+    storage.dev_read_file = dev_platform_read_file;
+    storage.dev_free_file = dev_platform_free_file;
+    storage.dev_write_file = dev_platform_write_file;
+#endif
 
-            const Win32GameCodePaths game_code_paths = win32_get_game_code_paths(win32_state.exe_dir);
-            Win32GameCode game_code = win32_load_game_code(game_code_paths);
+    Win32State win32_state = {
+        .game_memory = storage.main,
+        .game_memory_size = storage.main_size,
+    };
+    win32_get_exe_dir(win32_state.exe_dir);
 
-            u64 last_cycle_count = __rdtsc();
-            LARGE_INTEGER last_counter = win32_wall_clock();
+    const Win32GameCodePaths game_code_paths = win32_get_game_code_paths(win32_state.exe_dir);
+    Win32GameCode game_code = win32_load_game_code(game_code_paths);
 
-            f32 target_seconds_per_frame = 1.0f / static_cast<f32>(k_game_refresh_hz);
+    const f32 target_seconds_per_frame = 1.0f / static_cast<f32>(k_game_refresh_hz);
+    u64 last_cycle_count = __rdtsc();
+    LARGE_INTEGER last_counter = win32_wall_clock();
 
-            Input input[2] = {};
-            Input* curr_input = &input[0];
-            Input* prev_input = &input[1];
-            // Played back input goes here rather than over curr_input, so the
-            // live keyboard state is still accurate once playback stops.
-            Input playback_input = {};
-            LoopMode last_loop_mode = LoopMode::Off;
+    Input input[2] = {};
+    Input* curr_input = &input[0];
+    Input* prev_input = &input[1];
+    // Played back input goes here rather than over curr_input, so the live
+    // keyboard state is still accurate once playback stops.
+    Input playback_input = {};
+    LoopMode last_loop_mode = LoopMode::Off;
 
-            while (running) {
-                // Hot reload: swap in the new DLL once the build has finished writing it.
-                FILETIME dll_write_time = win32_get_last_write_time(game_code_paths.source_dll);
-                if (CompareFileTime(&dll_write_time, &game_code.dll_last_write_time) != 0
-                    && !win32_file_exists(game_code_paths.lock)) {
-                    win32_unload_game_code(game_code);
-                    game_code = win32_load_game_code(game_code_paths);
-                }
+    running = true;
+    while (running) {
+        // Hot reload: swap in the new DLL once the build has finished writing it.
+        FILETIME dll_write_time = win32_get_last_write_time(game_code_paths.source_dll);
+        if (CompareFileTime(&dll_write_time, &game_code.dll_last_write_time) != 0
+            && !win32_file_exists(game_code_paths.lock)) {
+            win32_unload_game_code(game_code);
+            game_code = win32_load_game_code(game_code_paths);
+        }
 
-                ControllerInput* kb = &curr_input->controllers[0];
-                ControllerInput* prev_kb = &prev_input->controllers[0];
-                *kb = {};
-                kb->is_connected = true;
-                for (u8 i = 0; i < ARRAYSIZE(kb->actions); i++) {
-                    kb->actions[i].ended_down = prev_kb->actions[i].ended_down;
-                }
-                win32_process_message(*kb, win32_state);
+        // Keyboard: buttons stay down across frames until a key-up message arrives.
+        ControllerInput& kb = curr_input->controllers[0];
+        const ControllerInput& prev_kb = prev_input->controllers[0];
+        kb = {};
+        kb.is_connected = true;
+        for (u8 i = 0; i < ARRAYSIZE(kb.actions); i++) {
+            kb.actions[i].ended_down = prev_kb.actions[i].ended_down;
+        }
+        win32_process_message(kb, win32_state);
 
-                constexpr DWORD max_controllers = std::min<DWORD>(XUSER_MAX_COUNT, k_max_controllers);
+        win32_poll_gamepads(*curr_input, *prev_input);
 
-                for (DWORD idx = 0; idx < max_controllers - 1; idx++) {
-                    ControllerInput* new_input = &curr_input->controllers[idx + 1];
-                    ControllerInput* old_input = &prev_input->controllers[idx + 1];
+        Input* game_input = curr_input;
+        if (win32_state.recording_idx != 0) {
+            win32_record_input(win32_state, *curr_input);
+        }
+        if (win32_state.playback_idx != 0) {
+            win32_playback_input(win32_state, playback_input);
+            if (win32_state.playback_idx != 0) {
+                game_input = &playback_input;
+            }
+        }
 
-                    XINPUT_STATE controller_state;
-                    if (XInputGetState(idx, &controller_state) == ERROR_SUCCESS) {
-                        XINPUT_GAMEPAD* pad = &controller_state.Gamepad;
-                        new_input->is_analog = true;
-                        new_input->is_connected = true;
+        ScreenBuffer offscreen_buffer = {
+            .pixels = global_backbuffer.pixels,
+            .width = static_cast<u32>(global_backbuffer.width),
+            .height = static_cast<u32>(global_backbuffer.height),
+            .pitch = static_cast<u32>(global_backbuffer.width),
+        };
+        game_code.render(storage, offscreen_buffer, *game_input, audio_state);
+        process_audio(game_code.sound, sound_output, audio_state);
 
-                        // stick
-                        new_input->stick_avg_x =
-                            win32_normalize_xinput_stick(pad->sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
-                        new_input->stick_avg_y =
-                            win32_normalize_xinput_stick(pad->sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+        win32_draw_loop_overlay(global_backbuffer, win32_state);
+        LoopMode loop_mode = win32_loop_mode(win32_state);
+        if (loop_mode != last_loop_mode) {
+            SetWindowText(window, win32_window_title(loop_mode));
+            last_loop_mode = loop_mode;
+        }
 
-                        // dpad, overrides joystick when used
-                        if (pad->wButtons & XINPUT_GAMEPAD_DPAD_UP) {
-                            new_input->is_analog = false;
-                            new_input->stick_avg_y = 1.0f;
-                        }
-                        if (pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN) {
-                            new_input->is_analog = false;
-                            new_input->stick_avg_y = -1.0f;
-                        }
-                        if (pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) {
-                            new_input->is_analog = false;
-                            new_input->stick_avg_x = 1.0f;
-                        }
-                        if (pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT) {
-                            new_input->is_analog = false;
-                            new_input->stick_avg_x = -1.0f;
-                        }
+        Win32WindowDim window_dim = win32_get_window_dim(window);
+        win32_display_buffer_in_window(device_ctx, global_backbuffer, window_dim.width, window_dim.height);
 
-                        f32 move_threshold = 0.5f;
-                        win32_process_xinput_button(
-                            (new_input->stick_avg_x < -move_threshold) ? 1 : 0,
-                            1,
-                            input_action(*old_input, Action::MoveLeft),
-                            input_action(*new_input, Action::MoveLeft)
-                        );
-                        win32_process_xinput_button(
-                            (new_input->stick_avg_x > move_threshold) ? 1 : 0,
-                            1,
-                            input_action(*old_input, Action::MoveRight),
-                            input_action(*new_input, Action::MoveRight)
-                        );
-                        win32_process_xinput_button(
-                            (new_input->stick_avg_y < -move_threshold) ? 1 : 0,
-                            1,
-                            input_action(*old_input, Action::MoveDown),
-                            input_action(*new_input, Action::MoveDown)
-                        );
-                        win32_process_xinput_button(
-                            (new_input->stick_avg_y > move_threshold) ? 1 : 0,
-                            1,
-                            input_action(*old_input, Action::MoveUp),
-                            input_action(*new_input, Action::MoveUp)
-                        );
-
-                        win32_log(
-                            LogSeverity::Info,
-                            "stick info: x = %.02f | y = %.02f | threshold = %.02f\n",
-                            new_input->stick_avg_x,
-                            new_input->stick_avg_y,
-                            move_threshold
-                        );
-
-                        // buttons
-                        win32_process_xinput_button(
-                            pad->wButtons,
-                            XINPUT_GAMEPAD_Y,
-                            input_action(*old_input, Action::ActionUp),
-                            input_action(*new_input, Action::ActionUp)
-                        );
-                        win32_process_xinput_button(
-                            pad->wButtons,
-                            XINPUT_GAMEPAD_A,
-                            input_action(*old_input, Action::ActionDown),
-                            input_action(*new_input, Action::ActionDown)
-                        );
-                        win32_process_xinput_button(
-                            pad->wButtons,
-                            XINPUT_GAMEPAD_X,
-                            input_action(*old_input, Action::ActionLeft),
-                            input_action(*new_input, Action::ActionLeft)
-                        );
-                        win32_process_xinput_button(
-                            pad->wButtons,
-                            XINPUT_GAMEPAD_B,
-                            input_action(*old_input, Action::ActionRight),
-                            input_action(*new_input, Action::ActionRight)
-                        );
-                        win32_process_xinput_button(
-                            pad->wButtons,
-                            XINPUT_GAMEPAD_LEFT_SHOULDER,
-                            input_action(*old_input, Action::LeftShoulder),
-                            input_action(*new_input, Action::LeftShoulder)
-                        );
-                        win32_process_xinput_button(
-                            pad->wButtons,
-                            XINPUT_GAMEPAD_RIGHT_SHOULDER,
-                            input_action(*old_input, Action::RightShoulder),
-                            input_action(*new_input, Action::RightShoulder)
-                        );
-                    } else {
-                        new_input->is_connected = false;
+        // Hold the frame rate: sleep off most of the remaining time, then spin.
+        f32 frame_seconds = win32_seconds_elapsed(last_counter, win32_wall_clock());
+        if (frame_seconds < target_seconds_per_frame) {
+            while (frame_seconds < target_seconds_per_frame) {
+                if (sched_is_granular) {
+                    DWORD sleep_ms = static_cast<DWORD>(1000.0f * (target_seconds_per_frame - frame_seconds));
+                    if (sleep_ms > 0) {
+                        Sleep(sleep_ms);
                     }
                 }
-
-                ScreenBuffer offscreen_buffer = {
-                    .pixels = global_backbuffer.pixels,
-                    .width = static_cast<u32>(global_backbuffer.width),
-                    .height = static_cast<u32>(global_backbuffer.height),
-                    .pitch = static_cast<u32>(global_backbuffer.width),
-                };
-
-                Input* game_input = curr_input;
-                if (win32_state.recording_idx != 0) {
-                    win32_record_input(win32_state, *curr_input);
-                }
-                if (win32_state.playback_idx != 0) {
-                    win32_playback_input(win32_state, playback_input);
-                    if (win32_state.playback_idx != 0) {
-                        game_input = &playback_input;
-                    }
-                }
-
-                game_code.render(storage, offscreen_buffer, *game_input, audio_state);
-                process_audio(game_code.sound, sound_output, audio_state);
-
-                win32_draw_loop_overlay(global_backbuffer, win32_state);
-                LoopMode loop_mode = win32_loop_mode(win32_state);
-                if (loop_mode != last_loop_mode) {
-                    SetWindowText(window_handle, win32_window_title(loop_mode));
-                    last_loop_mode = loop_mode;
-                }
-
-                HDC device_ctx = GetDC(window_handle);
-                Win32WindowDim window_dim = get_window_dim(window_handle);
-                win32_display_window_buffer(device_ctx, global_backbuffer, window_dim.width, window_dim.height);
-                ReleaseDC(window_handle, device_ctx);
-
-                LARGE_INTEGER work_counter = win32_wall_clock();
-                f32 frame_seconds = win32_seconds_elapsed(last_counter, work_counter);
-                f32 frame_wait = frame_seconds;
-                if (frame_seconds < target_seconds_per_frame) {
-                    while (frame_wait < target_seconds_per_frame) {
-                        if (sched_is_granular) {
-                            DWORD sleep_ms = static_cast<DWORD>(1000.0f * (target_seconds_per_frame - frame_wait));
-                            if (sleep_ms > 0) {
-                                Sleep(sleep_ms);
-                            }
-                        }
-                        frame_wait = win32_seconds_elapsed(last_counter, win32_wall_clock());
-                    }
-                } else {
-                    win32_log(
-                        LogSeverity::Warn,
-                        "frame rate [%.02f] missed target frame rate [%.02f]\n",
-                        frame_seconds,
-                        target_seconds_per_frame
-                    );
-                }
-
-                LARGE_INTEGER end_counter = win32_wall_clock();
-                f32 ms_per_frame = 1000.0f * win32_seconds_elapsed(last_counter, end_counter);
-                last_counter = end_counter;
-
-                u64 end_cycle_count = __rdtsc();
-                i64 cycles_elapsed = end_cycle_count - last_cycle_count;
-                last_cycle_count = end_cycle_count;
-                f32 fps = 0.0f;
-                // static_cast<f32>(static_cast<f32>(perf_count_freq) / static_cast<f32>(counter_elapsed));
-                f32 mcpf = static_cast<f32>(static_cast<f32>(cycles_elapsed) / (1000.0f * 1000.0f));
-
-                win32_log(LogSeverity::Info, "%.02fms/f | %.02ffps | %.02fmcpf\n", ms_per_frame, fps, mcpf);
-
-                std::swap(curr_input, prev_input);
+                frame_seconds = win32_seconds_elapsed(last_counter, win32_wall_clock());
             }
         } else {
-            // TODO logging
+            win32_log(
+                LogSeverity::Warn,
+                "frame took %.02fms, missed target of %.02fms\n",
+                1000.0f * frame_seconds,
+                1000.0f * target_seconds_per_frame
+            );
         }
-    } else {
-        // TODO logging
+
+        LARGE_INTEGER end_counter = win32_wall_clock();
+        f32 ms_per_frame = 1000.0f * win32_seconds_elapsed(last_counter, end_counter);
+        last_counter = end_counter;
+
+        u64 end_cycle_count = __rdtsc();
+        u64 cycles_elapsed = end_cycle_count - last_cycle_count;
+        last_cycle_count = end_cycle_count;
+
+        f32 fps = 1000.0f / ms_per_frame;
+        f32 mcpf = static_cast<f32>(cycles_elapsed) / (1000.0f * 1000.0f);  // megacycles per frame
+        win32_log(LogSeverity::Info, "%.02fms/f | %.02ffps | %.02fmcpf\n", ms_per_frame, fps, mcpf);
+
+        std::swap(curr_input, prev_input);
     }
 }

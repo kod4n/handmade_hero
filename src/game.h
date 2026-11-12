@@ -89,7 +89,7 @@ enum class Action : u8 {
     MoveRight,
     LeftShoulder,
     RightShoulder,
-    Count,
+    Count,  // this must remain the terminal enum value
 };
 
 struct ControllerInput {
