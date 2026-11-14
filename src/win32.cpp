@@ -558,17 +558,41 @@ static LoopMode win32_loop_mode(const Win32State& state) {
     return LoopMode::Off;
 }
 
-static const char* win32_window_title(LoopMode mode) {
+static constexpr const char* k_window_title = "Handmade Hero";
+
+struct Win32FrameStats {
+    f32 ms_per_frame;
+    f32 fps;
+    f32 mcpf;  // megacycles per frame
+};
+
+static const char* win32_loop_mode_label(LoopMode mode) {
     switch (mode) {
         using enum LoopMode;
     case Off:
-        return "Handmade Hero";
+        return "";
     case Recording:
-        return "Handmade Hero [recording loop]";
+        return " [recording loop]";
     case Playback:
-        return "Handmade Hero [looping playback]";
+        return " [looping playback]";
     }
-    return "Handmade Hero";  // should not get here with exhaustive switch
+    return "";  // should not get here with exhaustive switch
+}
+
+static void win32_window_title(char* title, size_t title_size, LoopMode mode, const Win32FrameStats& stats) {
+    HRESULT hr = StringCchPrintfA(
+        title,
+        title_size,
+        "%s%s [%.02fms/f | %.02ffps | %.02fmcpf]",
+        k_window_title,
+        win32_loop_mode_label(mode),
+        stats.ms_per_frame,
+        stats.fps,
+        stats.mcpf
+    );
+    if (FAILED(hr)) {
+        win32_log_hresult("window title formatting", hr);
+    }
 }
 
 // Fills [x_min, x_max) x [y_min, y_max), clipped to the backbuffer. The game has its own
@@ -1070,7 +1094,7 @@ int CALLBACK WinMain(
     HWND window = CreateWindowEx(
         window_ex_style,
         window_class.lpszClassName,
-        win32_window_title(LoopMode::Off),
+        k_window_title,
         window_style,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
@@ -1142,7 +1166,6 @@ int CALLBACK WinMain(
     // Played back input goes here rather than over curr_input, so the live
     // keyboard state is still accurate once playback stops.
     Input playback_input = {};
-    LoopMode last_loop_mode = LoopMode::Off;
 
     running = true;
     while (running) {
@@ -1187,11 +1210,6 @@ int CALLBACK WinMain(
         process_audio(game_code.sound, sound_output, audio_state);
 
         win32_draw_loop_overlay(global_backbuffer, win32_state);
-        LoopMode loop_mode = win32_loop_mode(win32_state);
-        if (loop_mode != last_loop_mode) {
-            SetWindowText(window, win32_window_title(loop_mode));
-            last_loop_mode = loop_mode;
-        }
 
         Win32WindowDim window_dim = win32_get_window_dim(window);
         win32_display_buffer_in_window(device_ctx, global_backbuffer, window_dim.width, window_dim.height);
@@ -1225,9 +1243,16 @@ int CALLBACK WinMain(
         u64 cycles_elapsed = end_cycle_count - last_cycle_count;
         last_cycle_count = end_cycle_count;
 
-        f32 fps = 1000.0f / ms_per_frame;
-        f32 mcpf = static_cast<f32>(cycles_elapsed) / (1000.0f * 1000.0f);  // megacycles per frame
-        win32_log(LogSeverity::Info, "%.02fms/f | %.02ffps | %.02fmcpf\n", ms_per_frame, fps, mcpf);
+        Win32FrameStats stats = {
+            .ms_per_frame = ms_per_frame,
+            .fps = 1000.0f / ms_per_frame,
+            .mcpf = static_cast<f32>(cycles_elapsed) / (1000.0f * 1000.0f),
+        };
+        win32_log(LogSeverity::Info, "%.02fms/f | %.02ffps | %.02fmcpf\n", stats.ms_per_frame, stats.fps, stats.mcpf);
+
+        char title[256];
+        win32_window_title(title, ARRAYSIZE(title), win32_loop_mode(win32_state), stats);
+        SetWindowText(window, title);
 
         std::swap(curr_input, prev_input);
     }
