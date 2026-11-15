@@ -13,7 +13,7 @@
 #include <cstdarg>
 #include <utility>
 
-using namespace HH;
+using namespace hh;
 
 // render constants
 static constexpr u32 k_monitor_refresh_hz = 60;
@@ -1064,7 +1064,7 @@ int CALLBACK WinMain(
     defer(if (sched_is_granular) { timeEndPeriod(desired_sched_ms); });
     win32_log(LogSeverity::Info, "scheduler is granular? %s\n", sched_is_granular ? "true" : "false");
 
-    win32_resize_dib_section(&global_backbuffer, 1280, 720);
+    win32_resize_dib_section(&global_backbuffer, 960, 540);
 
     WNDCLASS window_class = {
         // CS_OWNDC: the window keeps one DC for its whole life, so it's fetched once below.
@@ -1163,6 +1163,8 @@ int CALLBACK WinMain(
     Input input[2] = {};
     Input* curr_input = &input[0];
     Input* prev_input = &input[1];
+    curr_input->frame_dt = target_seconds_per_frame;
+    prev_input->frame_dt = target_seconds_per_frame;
     // Played back input goes here rather than over curr_input, so the live
     // keyboard state is still accurate once playback stops.
     Input playback_input = {};
@@ -1186,7 +1188,6 @@ int CALLBACK WinMain(
             kb.actions[i].ended_down = prev_kb.actions[i].ended_down;
         }
         win32_process_message(kb, win32_state);
-
         win32_poll_gamepads(*curr_input, *prev_input);
 
         Input* game_input = curr_input;

@@ -6,7 +6,7 @@
 #include <numbers>
 #include <span>
 
-namespace HH {
+namespace hh {
 
 inline constexpr f32 k_pi = std::numbers::pi_v<f32>;
 inline constexpr u32 k_max_controllers = 4;
@@ -66,9 +66,7 @@ struct AudioState {
 // Always the first allocation in Storage::main.
 struct GameState {
     Arena permanent_arena;  // remainder of Storage::main after GameState
-    int x_offset;
-    int y_offset;
-    int player_x;  // top-left corner, in pixels
+    int player_x;           // top-left corner, in pixels
     int player_y;
 };
 static_assert(ArenaType<GameState>);
@@ -115,6 +113,7 @@ inline const ActionState& input_action(const ControllerInput& controller, Action
 
 struct Input {
     ControllerInput controllers[k_max_controllers];
+    f32 frame_dt;
 };
 
 // Game entry points. On Windows they're exported from game.dll with C linkage
@@ -127,4 +126,4 @@ inline u32 safe_truncate(u64 value) {
     assert(value <= UINT32_MAX);
     return static_cast<u32>(value);
 }
-}  // namespace HH
+}  // namespace hh
