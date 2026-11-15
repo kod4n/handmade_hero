@@ -1163,14 +1163,14 @@ int CALLBACK WinMain(
     Input input[2] = {};
     Input* curr_input = &input[0];
     Input* prev_input = &input[1];
-    curr_input->frame_dt = target_seconds_per_frame;
-    prev_input->frame_dt = target_seconds_per_frame;
     // Played back input goes here rather than over curr_input, so the live
     // keyboard state is still accurate once playback stops.
     Input playback_input = {};
 
     running = true;
     while (running) {
+        curr_input->frame_dt = target_seconds_per_frame;
+
         // Hot reload: swap in the new DLL once the build has finished writing it.
         FILETIME dll_write_time = win32_get_last_write_time(game_code_paths.source_dll);
         if (CompareFileTime(&dll_write_time, &game_code.dll_last_write_time) != 0
