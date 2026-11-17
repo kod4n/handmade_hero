@@ -1,6 +1,7 @@
 #include "math.h"
 #include "render.h"
 #include "game.h"
+#include "tile.cpp"
 
 #include <algorithm>
 #include <cmath>
@@ -57,32 +58,65 @@ extern "C" void game_sound(AudioBuffer& audio, AudioState& state) {
     }
 }
 
-extern "C" void game_render(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state) {
+extern "C" void game_render(
+    Storage& storage,
+    ScreenBuffer& buffer,
+    Input& input,
+    [[maybe_unused]] AudioState& audio_state
+) {
     if (!storage.is_initialized) {
         Arena arena = arena_make(storage.main, storage.main_size);
         GameState* state = arena_push<GameState>(arena);
         state->permanent_arena = arena;
         state->player_x = 100;
         state->player_y = 100;
+        state->player_map_x = 0;
+        state->player_map_y = 0;
+
+        World& world = state->world;
+        world.map_count_x = 2;
+        world.map_count_y = 2;
+        u32 map_count = world.map_count_x * world.map_count_y;
+        world.maps = arena_push_array<TileMap>(state->permanent_arena, map_count).data();
+
+        // indexed [y][x]
+        u32* tiles[2][2] = {
+            {reinterpret_cast<u32*>(map00), reinterpret_cast<u32*>(map01)},
+            {reinterpret_cast<u32*>(map10), reinterpret_cast<u32*>(map11)},
+        };
+        for (u32 y = 0; y < world.map_count_y; y++) {
+            for (u32 x = 0; x < world.map_count_x; x++) {
+                world.maps[y * world.map_count_x + x] = {
+                    .count_x = k_tile_cols,
+                    .count_y = k_tile_rows,
+                    .min_x = k_render_min_x,
+                    .min_y = k_render_min_y,
+                    .tile_width = k_tile_width,
+                    .tile_height = k_tile_height,
+                    .tiles = tiles[y][x],
+                };
+            }
+        }
 
         storage.is_initialized = true;
     }
     GameState* state = static_cast<GameState*>(storage.main);
 
+    constexpr f32 player_width = 0.75f * k_tile_width;
+    constexpr f32 player_height = k_tile_height;
+
     for (auto& controller : input.controllers) {
         if (!controller.is_connected) {
             continue;
         }
-        constexpr f32 player_speed = 32.0f;  // pixels per frame
+        constexpr f32 player_speed = 128.0f;  // pixels per second
+        f32 dx = 0.0f;
+        f32 dy = 0.0f;
         if (controller.is_analog) {
-            audio_state.tone_hz = 256 + static_cast<int>(128.0f * controller.stick_avg_y);
-
             // Stick y is up-positive, the screen is top-down.
-            state->player_x += static_cast<int>(player_speed * controller.stick_avg_x);
-            state->player_y -= static_cast<int>(player_speed * controller.stick_avg_y);
+            dx = controller.stick_avg_x;
+            dy = -controller.stick_avg_y;
         } else {  // mkb
-            f32 dx = 0.0f;
-            f32 dy = 0.0f;
             if (input_action(controller, Action::MoveLeft).ended_down) {
                 dx = -1.0f;
             }
@@ -95,53 +129,59 @@ extern "C" void game_render(Storage& storage, ScreenBuffer& buffer, Input& input
             if (input_action(controller, Action::MoveDown).ended_down) {
                 dy = 1.0f;
             }
+        }
 
-            dx *= player_speed;
-            dy *= player_speed;
+        dx *= player_speed;
+        dy *= player_speed;
 
-            state->player_x += static_cast<i32>(roundf(input.frame_dt * dx));
-            state->player_y += static_cast<i32>(roundf(input.frame_dt * dy));
+        WorldPos new_pos = {
+            .map_x = state->player_map_x,
+            .map_y = state->player_map_y,
+            .x = state->player_x + roundf(input.frame_dt * dx),
+            .y = state->player_y + roundf(input.frame_dt * dy),
+        };
+
+        // The player's position is the bottom-center of its rect, so check
+        // the feet's left and right edges too, not just the center.
+        WorldPos new_left = new_pos;
+        new_left.x -= 0.5f * player_width;
+        WorldPos new_right = new_pos;
+        new_right.x += 0.5f * player_width;
+
+        if (is_world_pos_empty(state->world, new_pos) && is_world_pos_empty(state->world, new_left)
+            && is_world_pos_empty(state->world, new_right)) {
+            // Crossing a map edge puts the player on the neighbouring map.
+            WorldPos pos = canonicalize(state->world, new_pos);
+            state->player_map_x = pos.map_x;
+            state->player_map_y = pos.map_y;
+            state->player_x = static_cast<i32>(pos.x);
+            state->player_y = static_cast<i32>(pos.y);
         }
     }
 
-    u32 tile_map[tile_height][tile_width] = {
-        //|          |           |           |
-        {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
-        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-        {1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1},
-        {1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1},
-        {1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1},
-        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-        {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
-    };
-
     // clear
-    render_rect(buffer, 0.0f, 0.0f, buffer.width, buffer.height, 1.0f, 0.0f, 1.0f);
+    render_rect(buffer, 0.0f, 0.0f, buffer.width, buffer.height, 0.0f, 0.0f, 0.0f);
 
-    f32 x_offset = -30.0f;
-    f32 y_offset = -30.0f;
-    for (u8 row = 0; row < tile_rows; row++) {
-        for (u8 col = 0; col < tile_cols; col++) {
-            u32 is_wall = tile_map[row][col];
+    TileMap& map = get_tile_map(state->world, state->player_map_x, state->player_map_y);
+    f32 x_offset = map.min_x;
+    f32 y_offset = map.min_y;
+    for (u8 row = 0; row < k_tile_rows; row++) {
+        for (u8 col = 0; col < k_tile_cols; col++) {
             f32 color = 0.5f;
-            if (is_wall) {
+            if (is_tile_wall(map, col, row)) {
                 color = 1.0f;
             }
 
-            f32 x_min = x_offset + static_cast<f32>(col * tile_width);
-            f32 x_max = x_min + static_cast<f32>(tile_width);
-            f32 y_min = y_offset + static_cast<f32>(row * tile_height);
-            f32 y_max = y_min + static_cast<f32>(tile_height);
+            f32 x_min = x_offset + static_cast<f32>(col * k_tile_width);
+            f32 x_max = x_min + static_cast<f32>(k_tile_width);
+            f32 y_min = y_offset + static_cast<f32>(row * k_tile_height);
+            f32 y_max = y_min + static_cast<f32>(k_tile_height);
 
             render_rect(buffer, x_min, y_min, x_max, y_max, color, color, color);
         }
     }
 
     // draw player
-    constexpr f32 player_width = 0.75f * tile_width;
-    constexpr f32 player_height = tile_height;
     const f32 player_left = state->player_x - 0.5f * player_width;
     const f32 player_top = state->player_y - player_height;
     constexpr f32 player_color_r = 1.0f;

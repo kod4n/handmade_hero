@@ -2,6 +2,7 @@
 
 #include "types.h"
 #include "arena.h"
+#include "tile.h"
 #include <cassert>
 #include <numbers>
 #include <span>
@@ -66,8 +67,11 @@ struct AudioState {
 // Always the first allocation in Storage::main.
 struct GameState {
     Arena permanent_arena;  // remainder of Storage::main after GameState
-    int player_x;           // top-left corner, in pixels
+    int player_x;           // bottom-center of the player, in pixels
     int player_y;
+    i32 player_map_x;       // which tile map of the world the player is on
+    i32 player_map_y;
+    World world;
 };
 static_assert(ArenaType<GameState>);
 

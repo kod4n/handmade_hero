@@ -3,9 +3,7 @@
 
 namespace hh {
 
-constexpr u8 tile_cols = 17;
-constexpr u8 tile_rows = 9;
-constexpr u8 tile_width = 60;
-constexpr u8 tile_height = 60;
+f32 k_render_min_x = -30.0f;
+f32 k_render_min_y = -30.0f;
 
 }  // namespace hh

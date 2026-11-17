@@ -65,6 +65,9 @@ struct Win32Audio {
 
 static bool running;
 static Win32OffscreenBuffer global_backbuffer;
+// Black border around the blitted image, so the buffer's edges are visible.
+constexpr int k_window_gutter_x = 10;
+constexpr int k_window_gutter_y = 10;
 static Win32Audio global_audio;
 
 struct Win32WindowDim {
@@ -836,17 +839,26 @@ static void win32_display_buffer_in_window(
 ) {
     const int width = backbuffer.width;
     const int height = backbuffer.height;
-    if (window_width > width) {
-        PatBlt(device_ctx, width, 0, window_width - width, window_height, BLACKNESS);
+    const int x_offset = k_window_gutter_x;
+    const int y_offset = k_window_gutter_y;
+
+    // Clear only the gutters around the image. Painting black over pixels the
+    // blit is about to cover would make them alternate every frame (flicker).
+    const int right = x_offset + width;
+    const int bottom = y_offset + height;
+    PatBlt(device_ctx, 0, 0, window_width, y_offset, BLACKNESS);   // top
+    PatBlt(device_ctx, 0, y_offset, x_offset, height, BLACKNESS);  // left
+    if (window_width > right) {
+        PatBlt(device_ctx, right, y_offset, window_width - right, height, BLACKNESS);  // right
     }
-    if (window_height > height) {
-        PatBlt(device_ctx, 0, height, width, window_height - height, BLACKNESS);
+    if (window_height > bottom) {
+        PatBlt(device_ctx, 0, bottom, window_width, window_height - bottom, BLACKNESS);  // bottom
     }
 
     StretchDIBits(
         device_ctx,
-        0,
-        0,
+        x_offset,
+        y_offset,
         width,
         height,
         0,
@@ -1087,8 +1099,13 @@ int CALLBACK WinMain(
 #endif
     constexpr DWORD window_style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
 
-    // Size the window so its client area exactly fits the backbuffer.
-    RECT window_rect = {0, 0, global_backbuffer.width, global_backbuffer.height};
+    // Size the window so its client area exactly fits the backbuffer plus the gutter on each side.
+    RECT window_rect = {
+        0,
+        0,
+        global_backbuffer.width + 2 * k_window_gutter_x,
+        global_backbuffer.height + 2 * k_window_gutter_y,
+    };
     AdjustWindowRectEx(&window_rect, window_style, FALSE, window_ex_style);
 
     HWND window = CreateWindowEx(
