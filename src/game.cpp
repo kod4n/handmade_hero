@@ -1,6 +1,7 @@
 #include "math.h"
 #include "render.h"
 #include "game.h"
+#include "random.h"
 #include "tile.cpp"
 
 #include <algorithm>
@@ -79,35 +80,59 @@ extern "C" void game_render(
         world.tile_side_in_meters = k_tile_side_in_meters;
         world.tile_side_in_pixels = k_tile_side_in_pixels;
         world.meters_to_pixels = static_cast<f32>(world.tile_side_in_pixels) / world.tile_side_in_meters;
-        world.chunk_count_x = 1;
-        world.chunk_count_y = 1;
-        u32 chunk_count = world.chunk_count_x * world.chunk_count_y;
-        world.chunks = arena_push_array<TileChunk>(state->permanent_arena, chunk_count).data();
-        for (u32 i = 0; i < chunk_count; i++) {
-            std::span<u32> tiles = arena_push_array<u32>(state->permanent_arena, k_chunk_dim * k_chunk_dim);
-            // Wall off everything the screens below don't fill in.
-            std::fill(tiles.begin(), tiles.end(), 1u);
-            world.chunks[i].tiles = tiles.data();
-        }
+        // world.chunk_hash starts empty: storage.main comes zeroed from the
+        // platform. Chunks are created as the screens below write into them,
+        // and new chunks start out as all wall.
 
-        // Lay the four screens out side by side in chunk (0, 0). Indexed [y][x].
-        using TileRow = u32[k_screen_tile_cols];
-        TileRow* screens[2][2] = {
-            {map00, map01},
-            {map10, map11},
-        };
-        for (u32 screen_y = 0; screen_y < 2; screen_y++) {
-            for (u32 screen_x = 0; screen_x < 2; screen_x++) {
-                for (u32 row = 0; row < k_screen_tile_rows; row++) {
-                    for (u32 col = 0; col < k_screen_tile_cols; col++) {
-                        set_tile_value(
-                            world,
-                            screen_x * k_screen_tile_cols + col,
-                            screen_y * k_screen_tile_rows + row,
-                            screens[screen_y][screen_x][row][col]
-                        );
+        // Generate a path of walled screens. Each screen opens a door on its
+        // right or bottom edge, chosen from the random table, and the next
+        // screen opens the matching door on its left or top edge.
+        //
+        // The path only moves right or down: stepping left/up from screen 0
+        // would wrap the u32 tile coordinates.
+        constexpr u32 screen_count = 100;
+        constexpr u32 door_col = k_screen_tile_cols / 2;
+        constexpr u32 door_row = k_screen_tile_rows / 2;
+        RandomSeries series = {};
+        u32 screen_x = 0;
+        u32 screen_y = 0;
+        bool door_left = false;
+        bool door_top = false;
+        for (u32 screen = 0; screen < screen_count; screen++) {
+            bool door_right = false;
+            bool door_bottom = false;
+            if (random_choice(series, 2) == 0) {
+                door_right = true;
+            } else {
+                door_bottom = true;
+            }
+
+            for (u32 row = 0; row < k_screen_tile_rows; row++) {
+                for (u32 col = 0; col < k_screen_tile_cols; col++) {
+                    bool wall = row == 0 || row == k_screen_tile_rows - 1 || col == 0
+                                || col == k_screen_tile_cols - 1;
+                    if ((col == 0 && door_left) || (col == k_screen_tile_cols - 1 && door_right)) {
+                        wall = wall && row != door_row;
                     }
+                    if ((row == 0 && door_top) || (row == k_screen_tile_rows - 1 && door_bottom)) {
+                        wall = wall && col != door_col;
+                    }
+                    set_tile_value(
+                        state->permanent_arena,
+                        world,
+                        screen_x * k_screen_tile_cols + col,
+                        screen_y * k_screen_tile_rows + row,
+                        wall ? 1u : 0u
+                    );
                 }
+            }
+
+            door_left = door_right;
+            door_top = door_bottom;
+            if (door_right) {
+                screen_x++;
+            } else {
+                screen_y++;
             }
         }
 
