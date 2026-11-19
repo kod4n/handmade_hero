@@ -74,6 +74,12 @@ extern "C" void game_render(
         state->player_map_y = 0;
 
         World& world = state->world;
+        world.tile_count_x = k_tile_cols;
+        world.tile_count_y = k_tile_rows;
+        world.tile_min_x = k_render_min_x;
+        world.tile_min_y = k_render_min_y;
+        world.tile_width = k_tile_width;
+        world.tile_height = k_tile_height;
         world.map_count_x = 2;
         world.map_count_y = 2;
         u32 map_count = world.map_count_x * world.map_count_y;
@@ -87,12 +93,6 @@ extern "C" void game_render(
         for (u32 y = 0; y < world.map_count_y; y++) {
             for (u32 x = 0; x < world.map_count_x; x++) {
                 world.maps[y * world.map_count_x + x] = {
-                    .count_x = k_tile_cols,
-                    .count_y = k_tile_rows,
-                    .min_x = k_render_min_x,
-                    .min_y = k_render_min_y,
-                    .tile_width = k_tile_width,
-                    .tile_height = k_tile_height,
                     .tiles = tiles[y][x],
                 };
             }
@@ -101,6 +101,7 @@ extern "C" void game_render(
         storage.is_initialized = true;
     }
     GameState* state = static_cast<GameState*>(storage.main);
+    World& world = state->world;
 
     constexpr f32 player_width = 0.75f * k_tile_width;
     constexpr f32 player_height = k_tile_height;
@@ -148,10 +149,10 @@ extern "C" void game_render(
         WorldPos new_right = new_pos;
         new_right.x += 0.5f * player_width;
 
-        if (is_world_pos_empty(state->world, new_pos) && is_world_pos_empty(state->world, new_left)
-            && is_world_pos_empty(state->world, new_right)) {
+        if (is_world_pos_empty(world, new_pos) && is_world_pos_empty(world, new_left)
+            && is_world_pos_empty(world, new_right)) {
             // Crossing a map edge puts the player on the neighbouring map.
-            WorldPos pos = canonicalize(state->world, new_pos);
+            WorldPos pos = canonicalize(world, new_pos);
             state->player_map_x = pos.map_x;
             state->player_map_y = pos.map_y;
             state->player_x = static_cast<i32>(pos.x);
@@ -162,13 +163,13 @@ extern "C" void game_render(
     // clear
     render_rect(buffer, 0.0f, 0.0f, buffer.width, buffer.height, 0.0f, 0.0f, 0.0f);
 
-    TileMap& map = get_tile_map(state->world, state->player_map_x, state->player_map_y);
-    f32 x_offset = map.min_x;
-    f32 y_offset = map.min_y;
+    TileMap& map = get_tile_map(world, state->player_map_x, state->player_map_y);
+    f32 x_offset = world.tile_min_x;
+    f32 y_offset = world.tile_min_y;
     for (u8 row = 0; row < k_tile_rows; row++) {
         for (u8 col = 0; col < k_tile_cols; col++) {
             f32 color = 0.5f;
-            if (is_tile_wall(map, col, row)) {
+            if (is_tile_wall(state->world, map, col, row)) {
                 color = 1.0f;
             }
 

@@ -9,18 +9,18 @@ constexpr u8 k_tile_width = 60;
 constexpr u8 k_tile_height = 60;
 
 struct TileMap {
-    i32 count_x;
-    i32 count_y;
-    f32 min_x;
-    f32 min_y;
-    f32 tile_width;
-    f32 tile_height;
     u32* tiles;
 };
 
 struct World {
     u32 map_count_x;
     u32 map_count_y;
+    u32 tile_count_x;
+    u32 tile_count_y;
+    f32 tile_min_x;
+    f32 tile_min_y;
+    f32 tile_width;
+    f32 tile_height;
     TileMap* maps;
 };
 
