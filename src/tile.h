@@ -41,6 +41,9 @@ struct World {
     TileChunk chunk_hash[k_chunk_hash_size];
 };
 
+// World y points up: +y is up, both in tile coordinates and in tile_rel_y.
+// Only rendering flips it to match the top-down pixel buffer.
+//
 // A position in the world: an absolute tile coordinate (chunk in the high
 // bits, tile within the chunk in the low bits) and the offset within that
 // tile in meters. Moving past tile 0 wraps the u32 around to a chunk index

@@ -85,10 +85,11 @@ extern "C" void game_render(
         // and new chunks start out as all wall.
 
         // Generate a path of walled screens. Each screen opens a door on its
-        // right or bottom edge, chosen from the random table, and the next
-        // screen opens the matching door on its left or top edge.
+        // right or top edge, chosen from the random table, and the next
+        // screen opens the matching door on its left or bottom edge. Row 0 is
+        // the bottom of a screen.
         //
-        // The path only moves right or down: stepping left/up from screen 0
+        // The path only moves right or up: stepping left/down from screen 0
         // would wrap the u32 tile coordinates.
         constexpr u32 screen_count = 100;
         constexpr u32 door_col = k_screen_tile_cols / 2;
@@ -97,24 +98,23 @@ extern "C" void game_render(
         u32 screen_x = 0;
         u32 screen_y = 0;
         bool door_left = false;
-        bool door_top = false;
+        bool door_bottom = false;
         for (u32 screen = 0; screen < screen_count; screen++) {
             bool door_right = false;
-            bool door_bottom = false;
+            bool door_top = false;
             if (random_choice(series, 2) == 0) {
                 door_right = true;
             } else {
-                door_bottom = true;
+                door_top = true;
             }
 
             for (u32 row = 0; row < k_screen_tile_rows; row++) {
                 for (u32 col = 0; col < k_screen_tile_cols; col++) {
-                    bool wall = row == 0 || row == k_screen_tile_rows - 1 || col == 0
-                                || col == k_screen_tile_cols - 1;
+                    bool wall = row == 0 || row == k_screen_tile_rows - 1 || col == 0 || col == k_screen_tile_cols - 1;
                     if ((col == 0 && door_left) || (col == k_screen_tile_cols - 1 && door_right)) {
                         wall = wall && row != door_row;
                     }
-                    if ((row == 0 && door_top) || (row == k_screen_tile_rows - 1 && door_bottom)) {
+                    if ((row == 0 && door_bottom) || (row == k_screen_tile_rows - 1 && door_top)) {
                         wall = wall && col != door_col;
                     }
                     set_tile_value(
@@ -128,7 +128,7 @@ extern "C" void game_render(
             }
 
             door_left = door_right;
-            door_top = door_bottom;
+            door_bottom = door_top;
             if (door_right) {
                 screen_x++;
             } else {
@@ -153,9 +153,8 @@ extern "C" void game_render(
         f32 dx = 0.0f;
         f32 dy = 0.0f;
         if (controller.is_analog) {
-            // Stick y is up-positive, the screen is top-down.
             dx = controller.stick_avg_x;
-            dy = -controller.stick_avg_y;
+            dy = controller.stick_avg_y;
         } else {  // mkb
             if (input_action(controller, Action::MoveLeft).ended_down) {
                 dx = -1.0f;
@@ -164,10 +163,10 @@ extern "C" void game_render(
                 dx = 1.0f;
             }
             if (input_action(controller, Action::MoveUp).ended_down) {
-                dy = -1.0f;
+                dy = 1.0f;
             }
             if (input_action(controller, Action::MoveDown).ended_down) {
-                dy = 1.0f;
+                dy = -1.0f;
             }
         }
 
@@ -201,6 +200,10 @@ extern "C" void game_render(
     const u32 screen_min_tile_y = (player_pos.abs_tile_y / k_screen_tile_rows) * k_screen_tile_rows;
     const f32 tile_side = static_cast<f32>(world.tile_side_in_pixels);
 
+    // World y points up but the pixel buffer is top-down, so rows are drawn
+    // upward from the bottom edge of the screen block.
+    const f32 screen_bottom = y_offset + static_cast<f32>(k_screen_tile_rows) * tile_side;
+
     for (u32 row = 0; row < k_screen_tile_rows; row++) {
         for (u32 col = 0; col < k_screen_tile_cols; col++) {
             f32 color = 0.5f;
@@ -210,8 +213,8 @@ extern "C" void game_render(
 
             f32 x_min = x_offset + static_cast<f32>(col) * tile_side;
             f32 x_max = x_min + tile_side;
-            f32 y_min = y_offset + static_cast<f32>(row) * tile_side;
-            f32 y_max = y_min + tile_side;
+            f32 y_max = screen_bottom - static_cast<f32>(row) * tile_side;
+            f32 y_min = y_max - tile_side;
 
             render_rect(buffer, x_min, y_min, x_max, y_max, color, color, color);
         }
@@ -221,10 +224,11 @@ extern "C" void game_render(
     const f32 m2p = world.meters_to_pixels;
     const f32 player_x =
         static_cast<f32>(player_pos.abs_tile_x - screen_min_tile_x) * tile_side + m2p * player_pos.tile_rel_x;
+    // Height of the player's feet above the bottom edge of the screen block.
     const f32 player_y =
         static_cast<f32>(player_pos.abs_tile_y - screen_min_tile_y) * tile_side + m2p * player_pos.tile_rel_y;
     const f32 player_left = x_offset + player_x - 0.5f * m2p * player_width;
-    const f32 player_top = y_offset + player_y - m2p * player_height;
+    const f32 player_top = screen_bottom - player_y - m2p * player_height;
     constexpr f32 player_color_r = 1.0f;
     constexpr f32 player_color_g = 1.0f;
     constexpr f32 player_color_b = 0.0f;
