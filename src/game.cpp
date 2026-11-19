@@ -211,6 +211,10 @@ extern "C" void game_render(
                 color = 1.0f;
             }
 
+            if (screen_min_tile_x + col == player_pos.abs_tile_x && screen_min_tile_y + row == player_pos.abs_tile_y) {
+                color = 0.75f;
+            }
+
             f32 x_min = x_offset + static_cast<f32>(col) * tile_side;
             f32 x_max = x_min + tile_side;
             f32 y_max = screen_bottom - static_cast<f32>(row) * tile_side;
