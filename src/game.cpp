@@ -68,33 +68,46 @@ extern "C" void game_render(
         Arena arena = arena_make(storage.main, storage.main_size);
         GameState* state = arena_push<GameState>(arena);
         state->permanent_arena = arena;
-        state->player_x = 100;
-        state->player_y = 100;
-        state->player_map_x = 0;
-        state->player_map_y = 0;
+        state->player_pos = {
+            .abs_tile_x = 2,
+            .abs_tile_y = 2,
+            .tile_rel_x = 0.25f,
+            .tile_rel_y = 0.25f,
+        };
 
         World& world = state->world;
-        world.tile_count_x = k_tile_cols;
-        world.tile_count_y = k_tile_rows;
-        world.tile_min_x = k_render_min_x;
-        world.tile_min_y = k_render_min_y;
-        world.tile_width = k_tile_width;
-        world.tile_height = k_tile_height;
-        world.map_count_x = 2;
-        world.map_count_y = 2;
-        u32 map_count = world.map_count_x * world.map_count_y;
-        world.maps = arena_push_array<TileMap>(state->permanent_arena, map_count).data();
+        world.tile_side_in_meters = k_tile_side_in_meters;
+        world.tile_side_in_pixels = k_tile_side_in_pixels;
+        world.meters_to_pixels = static_cast<f32>(world.tile_side_in_pixels) / world.tile_side_in_meters;
+        world.chunk_count_x = 1;
+        world.chunk_count_y = 1;
+        u32 chunk_count = world.chunk_count_x * world.chunk_count_y;
+        world.chunks = arena_push_array<TileChunk>(state->permanent_arena, chunk_count).data();
+        for (u32 i = 0; i < chunk_count; i++) {
+            std::span<u32> tiles = arena_push_array<u32>(state->permanent_arena, k_chunk_dim * k_chunk_dim);
+            // Wall off everything the screens below don't fill in.
+            std::fill(tiles.begin(), tiles.end(), 1u);
+            world.chunks[i].tiles = tiles.data();
+        }
 
-        // indexed [y][x]
-        u32* tiles[2][2] = {
-            {reinterpret_cast<u32*>(map00), reinterpret_cast<u32*>(map01)},
-            {reinterpret_cast<u32*>(map10), reinterpret_cast<u32*>(map11)},
+        // Lay the four screens out side by side in chunk (0, 0). Indexed [y][x].
+        using TileRow = u32[k_screen_tile_cols];
+        TileRow* screens[2][2] = {
+            {map00, map01},
+            {map10, map11},
         };
-        for (u32 y = 0; y < world.map_count_y; y++) {
-            for (u32 x = 0; x < world.map_count_x; x++) {
-                world.maps[y * world.map_count_x + x] = {
-                    .tiles = tiles[y][x],
-                };
+        for (u32 screen_y = 0; screen_y < 2; screen_y++) {
+            for (u32 screen_x = 0; screen_x < 2; screen_x++) {
+                for (u32 row = 0; row < k_screen_tile_rows; row++) {
+                    for (u32 col = 0; col < k_screen_tile_cols; col++) {
+                        set_tile_value(
+                            world,
+                            screen_x * k_screen_tile_cols + col,
+                            screen_y * k_screen_tile_rows + row,
+                            screens[screen_y][screen_x][row][col]
+                        );
+                    }
+                }
             }
         }
 
@@ -103,14 +116,15 @@ extern "C" void game_render(
     GameState* state = static_cast<GameState*>(storage.main);
     World& world = state->world;
 
-    constexpr f32 player_width = 0.75f * k_tile_width;
-    constexpr f32 player_height = k_tile_height;
+    // In meters.
+    const f32 player_height = 1.4f;
+    const f32 player_width = 0.75f * player_height;
 
     for (auto& controller : input.controllers) {
         if (!controller.is_connected) {
             continue;
         }
-        constexpr f32 player_speed = 128.0f;  // pixels per second
+        constexpr f32 player_speed = 3.0f;  // meters per second
         f32 dx = 0.0f;
         f32 dy = 0.0f;
         if (controller.is_analog) {
@@ -135,56 +149,57 @@ extern "C" void game_render(
         dx *= player_speed;
         dy *= player_speed;
 
-        WorldPos new_pos = {
-            .map_x = state->player_map_x,
-            .map_y = state->player_map_y,
-            .x = state->player_x + roundf(input.frame_dt * dx),
-            .y = state->player_y + roundf(input.frame_dt * dy),
-        };
+        // Crossing a map edge puts the player on the neighbouring map.
+        WorldPosition new_pos = offset(world, state->player_pos, input.frame_dt * dx, input.frame_dt * dy);
 
         // The player's position is the bottom-center of its rect, so check
         // the feet's left and right edges too, not just the center.
-        WorldPos new_left = new_pos;
-        new_left.x -= 0.5f * player_width;
-        WorldPos new_right = new_pos;
-        new_right.x += 0.5f * player_width;
+        WorldPosition new_left = offset(world, new_pos, -0.5f * player_width, 0.0f);
+        WorldPosition new_right = offset(world, new_pos, 0.5f * player_width, 0.0f);
 
         if (is_world_pos_empty(world, new_pos) && is_world_pos_empty(world, new_left)
             && is_world_pos_empty(world, new_right)) {
-            // Crossing a map edge puts the player on the neighbouring map.
-            WorldPos pos = canonicalize(world, new_pos);
-            state->player_map_x = pos.map_x;
-            state->player_map_y = pos.map_y;
-            state->player_x = static_cast<i32>(pos.x);
-            state->player_y = static_cast<i32>(pos.y);
+            state->player_pos = new_pos;
         }
     }
 
     // clear
     render_rect(buffer, 0.0f, 0.0f, buffer.width, buffer.height, 0.0f, 0.0f, 0.0f);
 
-    TileMap& map = get_tile_map(world, state->player_map_x, state->player_map_y);
-    f32 x_offset = world.tile_min_x;
-    f32 y_offset = world.tile_min_y;
-    for (u8 row = 0; row < k_tile_rows; row++) {
-        for (u8 col = 0; col < k_tile_cols; col++) {
+    // Pixel position on screen of the top-left tile of the screen shown.
+    const f32 x_offset = k_render_min_x;
+    const f32 y_offset = k_render_min_y;
+
+    // Show the screen-sized block of tiles the player is in.
+    const WorldPosition& player_pos = state->player_pos;
+    const u32 screen_min_tile_x = (player_pos.abs_tile_x / k_screen_tile_cols) * k_screen_tile_cols;
+    const u32 screen_min_tile_y = (player_pos.abs_tile_y / k_screen_tile_rows) * k_screen_tile_rows;
+    const f32 tile_side = static_cast<f32>(world.tile_side_in_pixels);
+
+    for (u32 row = 0; row < k_screen_tile_rows; row++) {
+        for (u32 col = 0; col < k_screen_tile_cols; col++) {
             f32 color = 0.5f;
-            if (is_tile_wall(state->world, map, col, row)) {
+            if (is_tile_wall(world, screen_min_tile_x + col, screen_min_tile_y + row)) {
                 color = 1.0f;
             }
 
-            f32 x_min = x_offset + static_cast<f32>(col * k_tile_width);
-            f32 x_max = x_min + static_cast<f32>(k_tile_width);
-            f32 y_min = y_offset + static_cast<f32>(row * k_tile_height);
-            f32 y_max = y_min + static_cast<f32>(k_tile_height);
+            f32 x_min = x_offset + static_cast<f32>(col) * tile_side;
+            f32 x_max = x_min + tile_side;
+            f32 y_min = y_offset + static_cast<f32>(row) * tile_side;
+            f32 y_max = y_min + tile_side;
 
             render_rect(buffer, x_min, y_min, x_max, y_max, color, color, color);
         }
     }
 
     // draw player
-    const f32 player_left = state->player_x - 0.5f * player_width;
-    const f32 player_top = state->player_y - player_height;
+    const f32 m2p = world.meters_to_pixels;
+    const f32 player_x =
+        static_cast<f32>(player_pos.abs_tile_x - screen_min_tile_x) * tile_side + m2p * player_pos.tile_rel_x;
+    const f32 player_y =
+        static_cast<f32>(player_pos.abs_tile_y - screen_min_tile_y) * tile_side + m2p * player_pos.tile_rel_y;
+    const f32 player_left = x_offset + player_x - 0.5f * m2p * player_width;
+    const f32 player_top = y_offset + player_y - m2p * player_height;
     constexpr f32 player_color_r = 1.0f;
     constexpr f32 player_color_g = 1.0f;
     constexpr f32 player_color_b = 0.0f;
@@ -192,8 +207,8 @@ extern "C" void game_render(
         buffer,
         player_left,
         player_top,
-        player_left + player_width,
-        player_top + player_height,
+        player_left + m2p * player_width,
+        player_top + m2p * player_height,
         player_color_r,
         player_color_g,
         player_color_b

@@ -1,10 +1,11 @@
 #pragma once
 #include "tile.h"
 #include <cassert>
+#include <cmath>
 
 namespace hh {
 
-u32 map00[k_tile_rows][k_tile_cols] = {
+u32 map00[k_screen_tile_rows][k_screen_tile_cols] = {
     //|          |           |           |
     {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
@@ -16,7 +17,7 @@ u32 map00[k_tile_rows][k_tile_cols] = {
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
     {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
 };
-u32 map01[k_tile_rows][k_tile_cols] = {
+u32 map01[k_screen_tile_rows][k_screen_tile_cols] = {
     //|          |           |           |
     {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
@@ -28,7 +29,7 @@ u32 map01[k_tile_rows][k_tile_cols] = {
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
     {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
 };
-u32 map10[k_tile_rows][k_tile_cols] = {
+u32 map10[k_screen_tile_rows][k_screen_tile_cols] = {
     //|          |           |           |
     {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
@@ -40,7 +41,7 @@ u32 map10[k_tile_rows][k_tile_cols] = {
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
     {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
 };
-u32 map11[k_tile_rows][k_tile_cols] = {
+u32 map11[k_screen_tile_rows][k_screen_tile_cols] = {
     //|          |           |           |
     {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1},
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
@@ -53,73 +54,93 @@ u32 map11[k_tile_rows][k_tile_cols] = {
     {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
 };
 
-bool is_valid_map(World& world, i32 map_x, i32 map_y) {
-    bool res = map_x >= 0 && map_y >= 0 && static_cast<u32>(map_x) < world.map_count_x
-               && static_cast<u32>(map_y) < world.map_count_y;
+// Where an absolute tile coordinate lands: which chunk, and which tile in it.
+struct ChunkPosition {
+    u32 chunk_x;
+    u32 chunk_y;
+    u32 tile_x;
+    u32 tile_y;
+};
+
+ChunkPosition get_chunk_position(u32 abs_tile_x, u32 abs_tile_y) {
+    ChunkPosition res = {
+        .chunk_x = abs_tile_x >> k_chunk_shift,
+        .chunk_y = abs_tile_y >> k_chunk_shift,
+        .tile_x = abs_tile_x & k_chunk_mask,
+        .tile_y = abs_tile_y & k_chunk_mask,
+    };
     return res;
 }
 
-// The map must exist; check with is_valid_map first if it might not.
-TileMap& get_tile_map(World& world, i32 map_x, i32 map_y) {
-    assert(is_valid_map(world, map_x, map_y));
-    TileMap& res = world.maps[static_cast<u32>(map_y) * world.map_count_x + static_cast<u32>(map_x)];
+// Null when the chunk is outside the world.
+TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y) {
+    TileChunk* res = nullptr;
+    if (chunk_x < world.chunk_count_x && chunk_y < world.chunk_count_y) {
+        res = &world.chunks[chunk_y * world.chunk_count_x + chunk_x];
+    }
     return res;
 }
 
-bool is_pos_empty(World& world, TileMap& map, f32 pos_x, f32 pos_y) {
+// Returns false, leaving value untouched, when the tile is outside the world.
+bool get_tile_value(World& world, u32 abs_tile_x, u32 abs_tile_y, u32& value) {
     bool res = false;
 
-    i32 tile_x = static_cast<i32>((pos_x - world.tile_min_x) / world.tile_width);
-    i32 tile_y = static_cast<i32>((pos_y - world.tile_min_y) / world.tile_height);
-
-    if (tile_x >= 0 && tile_x < k_tile_cols && tile_y >= 0 && tile_y < k_tile_rows) {
-        u32 tile_value = map.tiles[tile_y * world.tile_count_x + tile_x];
-        res = tile_value == 0;
+    ChunkPosition pos = get_chunk_position(abs_tile_x, abs_tile_y);
+    TileChunk* chunk = get_tile_chunk(world, pos.chunk_x, pos.chunk_y);
+    if (chunk) {
+        value = chunk->tiles[pos.tile_y * k_chunk_dim + pos.tile_x];
+        res = true;
     }
 
     return res;
 }
 
-// Moves a position that has stepped off the edge of its map onto the
-// neighbouring map. Assumes every map has the same dimensions and that a
-// position never moves more than one map width/height in a single step.
-WorldPos canonicalize(World& world, WorldPos pos) {
-    f32 map_width = world.tile_count_x * world.tile_width;
-    f32 map_height = world.tile_count_y * world.tile_height;
+// The tile must be inside the world.
+void set_tile_value(World& world, u32 abs_tile_x, u32 abs_tile_y, u32 value) {
+    ChunkPosition pos = get_chunk_position(abs_tile_x, abs_tile_y);
+    TileChunk* chunk = get_tile_chunk(world, pos.chunk_x, pos.chunk_y);
+    assert(chunk);
+    chunk->tiles[pos.tile_y * k_chunk_dim + pos.tile_x] = value;
+}
 
-    if (pos.x < world.tile_min_x) {
-        pos.x += map_width;
-        pos.map_x--;
-    } else if (pos.x >= world.tile_min_x + map_width) {
-        pos.x -= map_width;
-        pos.map_x++;
+bool is_tile_empty(World& world, u32 abs_tile_x, u32 abs_tile_y) {
+    u32 value = 0;
+    bool res = get_tile_value(world, abs_tile_x, abs_tile_y, value) && value == 0;
+    return res;
+}
+
+bool is_tile_wall(World& world, u32 abs_tile_x, u32 abs_tile_y) {
+    u32 value = 0;
+    bool res = get_tile_value(world, abs_tile_x, abs_tile_y, value) && value == 1;
+    return res;
+}
+
+// Carries an out-of-range offset within a tile into the absolute tile
+// coordinate. Carrying into the next chunk falls out of the bit layout, and
+// stepping left/up from tile 0 wraps to an off-world chunk.
+static void recanonicalize_coord(f32 tile_side, u32& tile, f32& tile_rel) {
+    i32 carry = static_cast<i32>(floorf(tile_rel / tile_side));
+    tile += static_cast<u32>(carry);
+    tile_rel -= static_cast<f32>(carry) * tile_side;
+    // A tiny negative tile_rel can round up to exactly tile_side above.
+    if (tile_rel >= tile_side) {
+        tile++;
+        tile_rel -= tile_side;
     }
 
-    if (pos.y < world.tile_min_y) {
-        pos.y += map_height;
-        pos.map_y--;
-    } else if (pos.y >= world.tile_min_y + map_height) {
-        pos.y -= map_height;
-        pos.map_y++;
-    }
+    assert(tile_rel >= 0.0f && tile_rel < tile_side);
+}
 
+WorldPosition offset(World& world, WorldPosition pos, f32 dx, f32 dy) {
+    pos.tile_rel_x += dx;
+    pos.tile_rel_y += dy;
+    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile_x, pos.tile_rel_x);
+    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile_y, pos.tile_rel_y);
     return pos;
 }
 
-bool is_world_pos_empty(World& world, WorldPos pos) {
-    bool res = false;
-
-    WorldPos can = canonicalize(world, pos);
-    if (is_valid_map(world, can.map_x, can.map_y)) {
-        res = is_pos_empty(world, get_tile_map(world, can.map_x, can.map_y), can.x, can.y);
-    }
-
-    return res;
-}
-
-bool is_tile_wall(World& world, TileMap& map, u32 tile_x, u32 tile_y) {
-    u32 tile_value = map.tiles[tile_y * world.tile_count_x + tile_x];
-    bool res = tile_value == 1;
+bool is_world_pos_empty(World& world, WorldPosition pos) {
+    bool res = is_tile_empty(world, pos.abs_tile_x, pos.abs_tile_y);
     return res;
 }
 
