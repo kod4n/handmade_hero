@@ -12,8 +12,8 @@ struct MacOSWindow {
 
 bool macos_window_init(MacOSWindow* window, int width, int height, const char* title);
 // Drains the event queue; keyboard events are recorded into `kb`.
-void macos_window_pump_events(MacOSWindow* window, HH::ControllerInput& kb);
-void macos_window_present(MacOSWindow* window, const HH::ScreenBuffer& buffer);
+void macos_window_pump_events(MacOSWindow* window, hh::ControllerInput& kb);
+void macos_window_present(MacOSWindow* window, const hh::ScreenBuffer& buffer);
 void macos_window_shutdown(MacOSWindow* window);
 // Fills gamepad controllers (slots 1..k_max_controllers-1).
-void macos_poll_gamepads(HH::Input& curr_input, const HH::Input& prev_input);
+void macos_poll_gamepads(hh::Input& curr_input, const hh::Input& prev_input);

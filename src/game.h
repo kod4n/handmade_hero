@@ -66,11 +66,11 @@ struct AudioState {
 
 // Always the first allocation in Storage::main.
 struct GameState {
-    Arena permanent_arena;     // remainder of Storage::main after GameState
-    WorldPosition player_pos;  // bottom-center of the player
+    arena::Arena permanent_arena;  // remainder of Storage::main after GameState
+    WorldPosition player_pos;      // bottom-center of the player
     World world;
 };
-static_assert(ArenaType<GameState>);
+static_assert(arena::ArenaType<GameState>);
 
 struct ActionState {
     i32 half_transition_count;

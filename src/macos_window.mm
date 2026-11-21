@@ -14,6 +14,10 @@ enum MacOSKeyCode : u16 {
   k_key_q = 0x0C,
   k_key_w = 0x0D,
   k_key_e = 0x0E,
+  k_key_left = 0x7B,  // kVK_LeftArrow
+  k_key_right = 0x7C, // kVK_RightArrow
+  k_key_down = 0x7D,  // kVK_DownArrow
+  k_key_up = 0x7E,    // kVK_UpArrow
 };
 
 // Keyboard controller being filled during macos_window_pump_events.
@@ -47,6 +51,18 @@ static void macos_process_key(u16 key_code, bool is_down) {
     break;
   case k_key_e:
     macos_process_kb_button(input_action(kb, Action::RightShoulder), is_down);
+    break;
+  case k_key_up:
+    macos_process_kb_button(input_action(kb, Action::ActionUp), is_down);
+    break;
+  case k_key_down:
+    macos_process_kb_button(input_action(kb, Action::ActionDown), is_down);
+    break;
+  case k_key_left:
+    macos_process_kb_button(input_action(kb, Action::ActionLeft), is_down);
+    break;
+  case k_key_right:
+    macos_process_kb_button(input_action(kb, Action::ActionRight), is_down);
     break;
   }
 }

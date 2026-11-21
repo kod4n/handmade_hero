@@ -31,7 +31,7 @@ constexpr u32 k_default_tile_value = 1;  // wall
 
 // Finds the chunk at (chunk_x, chunk_y). If it doesn't exist yet, creates it
 // from `arena` when one is given, and returns null otherwise.
-TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y, Arena* arena = nullptr) {
+TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y, arena::Arena* arena = nullptr) {
     u32 hash = chunk_x * 19 + chunk_y * 7 + (chunk_x >> 8) * 3;
     TileChunk* chunk = &world.chunk_hash[hash & (k_chunk_hash_size - 1)];
 
@@ -45,7 +45,7 @@ TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y, Arena* arena =
             if (!arena) {
                 return nullptr;
             }
-            chunk->next = arena_push<TileChunk>(*arena);
+            chunk->next = arena->push<TileChunk>();
             chunk->next->tiles = nullptr;
             chunk = chunk->next;
             break;
@@ -57,7 +57,7 @@ TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y, Arena* arena =
         return nullptr;
     }
 
-    std::span<u32> tiles = arena_push_array<u32>(*arena, k_chunk_dim * k_chunk_dim);
+    std::span<u32> tiles = arena->push_array<u32>(k_chunk_dim * k_chunk_dim);
     std::fill(tiles.begin(), tiles.end(), k_default_tile_value);
     chunk->chunk_x = chunk_x;
     chunk->chunk_y = chunk_y;
@@ -81,7 +81,7 @@ bool get_tile_value(World& world, u32 abs_tile_x, u32 abs_tile_y, u32& value) {
 }
 
 // Creates the tile's chunk from `arena` if it doesn't exist yet.
-void set_tile_value(Arena& arena, World& world, u32 abs_tile_x, u32 abs_tile_y, u32 value) {
+void set_tile_value(arena::Arena& arena, World& world, u32 abs_tile_x, u32 abs_tile_y, u32 value) {
     ChunkPosition pos = get_chunk_position(abs_tile_x, abs_tile_y);
     TileChunk* chunk = get_tile_chunk(world, pos.chunk_x, pos.chunk_y, &arena);
     assert(chunk);

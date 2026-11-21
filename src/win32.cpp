@@ -919,6 +919,22 @@ static void win32_process_message(ControllerInput& kb, Win32State& state) {
                 win32_process_kb_button(input_action(kb, Action::RightShoulder), is_down);
             } break;
 
+            case VK_UP: {
+                win32_process_kb_button(input_action(kb, Action::ActionUp), is_down);
+            } break;
+
+            case VK_DOWN: {
+                win32_process_kb_button(input_action(kb, Action::ActionDown), is_down);
+            } break;
+
+            case VK_LEFT: {
+                win32_process_kb_button(input_action(kb, Action::ActionLeft), is_down);
+            } break;
+
+            case VK_RIGHT: {
+                win32_process_kb_button(input_action(kb, Action::ActionRight), is_down);
+            } break;
+
             case 'L': {
                 if (is_down) {
                     win32_toggle_input_loop(state);

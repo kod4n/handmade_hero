@@ -66,8 +66,8 @@ extern "C" void game_render(
     [[maybe_unused]] AudioState& audio_state
 ) {
     if (!storage.is_initialized) {
-        Arena arena = arena_make(storage.main, storage.main_size);
-        GameState* state = arena_push<GameState>(arena);
+        arena::Arena arena = arena::make(storage.main, storage.main_size);
+        GameState* state = arena.push<GameState>();
         state->permanent_arena = arena;
         state->player_pos = {
             .abs_tile_x = 2,
@@ -149,13 +149,16 @@ extern "C" void game_render(
         if (!controller.is_connected) {
             continue;
         }
-        constexpr f32 player_speed = 3.0f;  // meters per second
+        f32 player_speed = 3.0f;  // meters per second
         f32 dx = 0.0f;
         f32 dy = 0.0f;
         if (controller.is_analog) {
             dx = controller.stick_avg_x;
             dy = controller.stick_avg_y;
         } else {  // mkb
+            if (input_action(controller, Action::ActionUp).ended_down) {
+                player_speed *= 2;
+            }
             if (input_action(controller, Action::MoveLeft).ended_down) {
                 dx = -1.0f;
             }
