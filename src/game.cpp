@@ -1,17 +1,63 @@
-#include "math.h"
 #include "game.h"
 #include "random.h"
+#include "defer.h"
 #include "tile.cpp"
-
-#include <algorithm>
-#include <cmath>
-#include <type_traits>
 
 namespace hh {
 
 static u32 pack_color(u8 r, u8 g, u8 b, u8 a = 0) {
     return (static_cast<u32>(a) << 24 | static_cast<u32>(r) << 16 | static_cast<u32>(g) << 8 | static_cast<u32>(b));
 }
+
+#if DEV
+// Copies the pixels into the arena as top-down rows, then frees the file. The
+// file's pixel data can start at an offset that isn't 4-aligned, so it's only
+// read through memcpy; the copy is aligned and can be indexed directly.
+static LoadedBitmap load_bmp(
+    arena::Arena& arena,
+    DevPlatformReadFile* read_file,
+    DevPlatformFreeFile* free_file,
+    const char* filename
+) {
+    LoadedBitmap result = {};
+    ReadFileResult res = read_file(filename);
+    if (!res.content) {
+        return result;
+    }
+    defer(free_file(res.content));
+    if (res.size < sizeof(BitmapHeader)) {
+        return result;
+    }
+
+    const u8* content = static_cast<const u8*>(res.content);
+    const BitmapHeader* header = reinterpret_cast<const BitmapHeader*>(content);
+    if (header->file_type != 0x4D42 || header->bits_per_pixel != 32 || header->width <= 0 || header->height == 0) {
+        return result;
+    }
+
+    // Positive height means rows are stored bottom-up.
+    const bool bottom_up = header->height > 0;
+    const u32 width = static_cast<u32>(header->width);
+    const u32 height = bottom_up ? static_cast<u32>(header->height) : 0u - static_cast<u32>(header->height);
+    const u64 row_bytes = static_cast<u64>(width) * sizeof(u32);
+    // The header's dimensions come from the file, so check they fit in it.
+    if (header->offset > res.size || row_bytes * height > res.size - header->offset) {
+        return result;
+    }
+
+    std::span<u32> pixels = arena.push_array<u32>(static_cast<u64>(width) * height);
+    const u8* src = content + header->offset;
+    for (u32 y = 0; y < height; y++) {
+        const u32 src_y = bottom_up ? height - 1 - y : y;
+        std::memcpy(&pixels[static_cast<u64>(y) * width], src + src_y * row_bytes, row_bytes);
+    }
+
+    result.pixels = pixels.data();
+    result.width = width;
+    result.height = height;
+    return result;
+}
+#endif
 
 // Fills [x_min, x_max) x [y_min, y_max), clipped to the buffer.
 static void render_rect(ScreenBuffer& buffer, f32 x0, f32 y0, f32 x1, f32 y1, f32 r, f32 g, f32 b) {
@@ -42,6 +88,43 @@ static void render_rect(ScreenBuffer& buffer, f32 x0, f32 y0, f32 x1, f32 y1, f3
     }
 }
 
+#if DEV
+// Stretches the bitmap over the whole buffer, nearest-neighbor. Assumes the
+// file's channel masks already match 0xAARRGGBB, as test_pattern.bmp's do.
+[[maybe_unused]] static void draw_bitmap_fullscreen(ScreenBuffer& buffer, const LoadedBitmap& bitmap) {
+    if (!bitmap.pixels) {
+        return;
+    }
+
+    for (u32 y = 0; y < buffer.height; y++) {
+        const u32 src_y = static_cast<u32>(static_cast<u64>(y) * bitmap.height / buffer.height);
+        const u32* src_row = bitmap.pixels + static_cast<u64>(src_y) * bitmap.width;
+        std::span<u32> row = buffer.pixels.subspan(static_cast<u64>(y) * buffer.pitch, buffer.width);
+        for (u32 x = 0; x < buffer.width; x++) {
+            const u32 src_x = static_cast<u32>(static_cast<u64>(x) * bitmap.width / buffer.width);
+            row[x] = src_row[src_x];
+        }
+    }
+}
+
+// Copies the bitmap 1:1 into the buffer's top-left corner, clipped to the
+// buffer. Same channel-mask assumption as draw_bitmap_fullscreen.
+static void draw_bitmap(ScreenBuffer& buffer, const LoadedBitmap& bitmap) {
+    if (!bitmap.pixels) {
+        return;
+    }
+
+    const u32 width = bitmap.width < buffer.width ? bitmap.width : buffer.width;
+    const u32 height = bitmap.height < buffer.height ? bitmap.height : buffer.height;
+
+    for (u32 y = 0; y < height; y++) {
+        const u32* src_row = bitmap.pixels + static_cast<u64>(y) * bitmap.width;
+        std::span<u32> row = buffer.pixels.subspan(static_cast<u64>(y) * buffer.pitch, width);
+        std::memcpy(row.data(), src_row, width * sizeof(u32));
+    }
+}
+#endif
+
 extern "C" void game_sound(AudioBuffer& audio, AudioState& state) {
     const f32 phase_step = 2.0f * k_pi * state.tone_hz / static_cast<f32>(audio.samples_per_second);
 
@@ -67,6 +150,9 @@ extern "C" void game_render(
     if (!storage.is_initialized) {
         arena::Arena arena = arena::make(storage.main, storage.main_size);
         GameState* state = arena.push<GameState>();
+#if DEV
+        state->test_bitmap = load_bmp(arena, storage.dev_read_file, storage.dev_free_file, "test_pattern.bmp");
+#endif
         state->permanent_arena = arena;
         state->player_pos = {
             .abs_tile_x = 2,
@@ -114,9 +200,15 @@ extern "C" void game_render(
             bool door_top = false;
             bool take_stairs = false;
             switch (random_choice(series, arrival_stairs == k_tile_empty ? 3 : 2)) {
-            case 0: door_right = true; break;
-            case 1: door_top = true; break;
-            default: take_stairs = true; break;
+            case 0:
+                door_right = true;
+                break;
+            case 1:
+                door_top = true;
+                break;
+            default:
+                take_stairs = true;
+                break;
             }
             const u32 departure_stairs = screen_z == 0 ? k_tile_stairs_up : k_tile_stairs_down;
 
@@ -339,6 +431,10 @@ extern "C" void game_render(
         player_color_g,
         player_color_b
     );
+
+#if DEV
+    draw_bitmap(buffer, state->test_bitmap);
+#endif
 }
 
 // Catch signature drift between the exported functions and the types the

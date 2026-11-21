@@ -4,6 +4,8 @@
 
 #include <AudioToolbox/AudioToolbox.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
 #include <mach/mach_time.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -12,9 +14,11 @@
 #include <array>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <utility>
 
-using namespace HH;
+using namespace hh;
 
 // render constants
 static constexpr u32 k_monitor_refresh_hz = 60;
@@ -92,13 +96,43 @@ static void macos_free(void* memory, u64 size) {
 // mmap needs the size to unmap; stash it in a header page before the content.
 static constexpr u64 k_dev_file_header_size = 16;
 
+// Asset folder, ending in a slash. The game passes file names relative to it,
+// so reads don't depend on the working directory. Set at startup.
+static char global_data_dir[PATH_MAX];
+
+// The executable is in build/, next to the repo's data/ folder.
+static bool macos_init_data_dir() {
+    char exe_path[PATH_MAX];
+    u32 size = sizeof(exe_path);
+    if (_NSGetExecutablePath(exe_path, &size) != 0) {
+        return false;
+    }
+    char resolved[PATH_MAX];
+    if (!realpath(exe_path, resolved)) {
+        return false;
+    }
+    char* last_slash = strrchr(resolved, '/');
+    if (!last_slash) {
+        return false;
+    }
+    last_slash[1] = '\0';
+    const int length = snprintf(global_data_dir, sizeof(global_data_dir), "%s../data/", resolved);
+    return length > 0 && static_cast<size_t>(length) < sizeof(global_data_dir);
+}
+
 namespace HH {
 ReadFileResult dev_platform_read_file(const char* filename) {
-    macos_log(LogSeverity::Info, "attempt file read for %s\n", filename);
     ReadFileResult result = {};
-    int fd = open(filename, O_RDONLY);
+    char path[PATH_MAX];
+    const int length = snprintf(path, sizeof(path), "%s%s", global_data_dir, filename);
+    if (length < 0 || static_cast<size_t>(length) >= sizeof(path)) {
+        macos_log(LogSeverity::Warn, "data path too long for %s\n", filename);
+        return result;
+    }
+    macos_log(LogSeverity::Info, "attempt file read for %s\n", path);
+    int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        macos_log(LogSeverity::Warn, "failed to read file %s\n", filename);
+        macos_log(LogSeverity::Warn, "failed to read file %s\n", path);
         return result;
     }
     defer(close(fd));
@@ -295,6 +329,9 @@ int main() {
     defer(macos_free(storage.main, total_storage_size));
     storage.transient = static_cast<u8*>(storage.main) + storage.main_size;
 #if DEV
+    if (!macos_init_data_dir()) {
+        macos_log(LogSeverity::Warn, "failed to find the data folder\n");
+    }
     storage.dev_read_file = dev_platform_read_file;
     storage.dev_free_file = dev_platform_free_file;
     storage.dev_write_file = dev_platform_write_file;

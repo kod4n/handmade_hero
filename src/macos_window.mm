@@ -4,7 +4,7 @@
 
 #include "macos_platform.h"
 
-using namespace HH;
+using namespace hh;
 
 // macOS virtual key codes (kVK_ANSI_* in <Carbon/HIToolbox/Events.h>).
 enum MacOSKeyCode : u16 {

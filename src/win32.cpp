@@ -210,16 +210,25 @@ static const char* log_severity(LogSeverity severity) {
 }
 
 #if DEV
+// Asset folder, ending in a backslash. The game passes file names relative to
+// it, so reads don't depend on the working directory. Set at startup.
+static char dev_data_dir[MAX_PATH];
+
 static void dev_platform_free_file(void* memory) {
     VirtualFree(memory, 0, MEM_RELEASE);
 }
 
 static ReadFileResult dev_platform_read_file(const char* filename) {
-    win32_log(LogSeverity::Info, "attempt file read for %s", filename);
     ReadFileResult result = {};
-    HANDLE file = CreateFile(filename, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    char path[MAX_PATH];
+    if (FAILED(StringCchPrintfA(path, MAX_PATH, "%s%s", dev_data_dir, filename))) {
+        win32_log(LogSeverity::Warn, "data path too long for %s", filename);
+        return result;
+    }
+    win32_log(LogSeverity::Info, "attempt file read for %s", path);
+    HANDLE file = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
-        win32_log(LogSeverity::Warn, "failed to read file %s", filename);
+        win32_log(LogSeverity::Warn, "failed to read file %s", path);
         return result;
     }
     defer(CloseHandle(file));
@@ -1185,6 +1194,10 @@ int CALLBACK WinMain(
         .game_memory_size = storage.main_size,
     };
     win32_get_exe_dir(win32_state.exe_dir);
+#if DEV
+    // The exe is in build/, next to the repo's data/ folder.
+    StringCchPrintfA(dev_data_dir, MAX_PATH, "%s..\\data\\", win32_state.exe_dir);
+#endif
 
     const Win32GameCodePaths game_code_paths = win32_get_game_code_paths(win32_state.exe_dir);
     Win32GameCode game_code = win32_load_game_code(game_code_paths);

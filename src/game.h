@@ -25,6 +25,29 @@ using DevPlatformFreeFile = void(void* memory);
 using DevPlatformWriteFile = bool(const char* filename, u32 size, void* memory);
 #endif
 
+#pragma pack(push, 1)
+struct BitmapHeader {
+    u16 file_type;
+    u32 file_size;
+    u16 reserved1;
+    u16 reserved2;
+    u32 offset;
+    u32 size;
+    i32 width;
+    i32 height;
+    u16 planes;
+    u16 bits_per_pixel;
+};
+#pragma pack(pop)
+static_assert(sizeof(BitmapHeader) == 30);
+
+struct LoadedBitmap {
+    u32* pixels;  // 0xAARRGGBB, top-down rows, width * height, in the arena
+    u32 width;
+    u32 height;
+};
+
+
 // Owned by the platform layer, so it survives game code reloads.
 struct Storage {
     bool is_initialized;
@@ -71,6 +94,7 @@ struct GameState {
     WorldPosition camera_pos;      // world point drawn at the center of the screen
     f32 debug_zoom;                // render scale; < 1 zooms out to inspect the map
     World world;
+    LoadedBitmap test_bitmap;
 };
 static_assert(arena::ArenaType<GameState>);
 
