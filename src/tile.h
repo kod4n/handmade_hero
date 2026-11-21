@@ -13,7 +13,7 @@ constexpr f32 k_tile_side_in_pixels = 60.0f;
 // Chunks are k_chunk_dim x k_chunk_dim tiles. An absolute tile coordinate
 // keeps the chunk index in its high bits and the tile within the chunk in
 // its low k_chunk_shift bits.
-constexpr u32 k_chunk_shift = 8;
+constexpr u32 k_chunk_shift = 4;
 constexpr u32 k_chunk_dim = 1u << k_chunk_shift;
 constexpr u32 k_chunk_mask = k_chunk_dim - 1;
 
@@ -22,6 +22,11 @@ constexpr u32 k_chunk_mask = k_chunk_dim - 1;
 // actually in use rather than with the world's extent.
 constexpr u32 k_chunk_hash_size = 4096;  // must be a power of two
 static_assert((k_chunk_hash_size & (k_chunk_hash_size - 1)) == 0);
+
+// Tile values.
+constexpr u32 k_tile_empty = 0;
+constexpr u32 k_tile_wall = 1;
+constexpr u32 k_tile_uninitialized = 2;  // in an allocated chunk, but never written
 
 struct TileChunk {
     u32 chunk_x;
@@ -34,7 +39,7 @@ struct TileChunk {
 // pixels, via meters_to_pixels.
 struct World {
     f32 tile_side_in_meters;
-    i32 tile_side_in_pixels;
+    f32 tile_side_in_pixels;
     f32 meters_to_pixels;
     // The first chunk of each chain lives inline; the rest come from the arena.
     // Zeroed memory is an empty table.

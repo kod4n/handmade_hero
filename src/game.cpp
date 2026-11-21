@@ -1,5 +1,4 @@
 #include "math.h"
-#include "render.h"
 #include "game.h"
 #include "random.h"
 #include "tile.cpp"
@@ -75,6 +74,8 @@ extern "C" void game_render(
             .tile_rel_x = 0.25f,
             .tile_rel_y = 0.25f,
         };
+        state->camera_pos = state->player_pos;
+        state->debug_zoom = 1.0f;
 
         World& world = state->world;
         world.tile_side_in_meters = k_tile_side_in_meters;
@@ -122,7 +123,7 @@ extern "C" void game_render(
                         world,
                         screen_x * k_screen_tile_cols + col,
                         screen_y * k_screen_tile_rows + row,
-                        wall ? 1u : 0u
+                        wall ? k_tile_wall : k_tile_empty
                     );
                 }
             }
@@ -149,7 +150,20 @@ extern "C" void game_render(
         if (!controller.is_connected) {
             continue;
         }
-        f32 player_speed = 3.0f;  // meters per second
+
+        // Debug zoom: left shoulder (Q) zooms out, right shoulder (E) zooms in.
+        auto pressed = [&](Action a) {
+            const ActionState& s = input_action(controller, a);
+            return s.ended_down && s.half_transition_count > 0;
+        };
+        constexpr f32 min_zoom = 1.0f / 16.0f;
+        if (pressed(Action::LeftShoulder)) {
+            state->debug_zoom = std::clamp(state->debug_zoom * 0.5f, min_zoom, 1.0f);
+        }
+        if (pressed(Action::RightShoulder)) {
+            state->debug_zoom = std::clamp(state->debug_zoom * 2.0f, min_zoom, 1.0f);
+        }
+        f32 player_speed = 6.0f;  // meters per second
         f32 dx = 0.0f;
         f32 dy = 0.0f;
         if (controller.is_analog) {
@@ -190,52 +204,77 @@ extern "C" void game_render(
         }
     }
 
+    // Ease the camera toward the player. 1 - exp(-k * dt) closes the same
+    // fraction of the gap per second regardless of frame rate.
+    {
+        constexpr f32 camera_stiffness = 8.0f;  // 1/s, higher = tighter follow
+        WorldDifference to_player = subtract(world, state->player_pos, state->camera_pos);
+        f32 t = 1.0f - expf(-camera_stiffness * input.frame_dt);
+        state->camera_pos = offset(world, state->camera_pos, t * to_player.dx, t * to_player.dy);
+    }
+
     // clear
     render_rect(buffer, 0.0f, 0.0f, buffer.width, buffer.height, 0.0f, 0.0f, 0.0f);
 
-    // Pixel position on screen of the top-left tile of the screen shown.
-    const f32 x_offset = k_render_min_x;
-    const f32 y_offset = k_render_min_y;
-
-    // Show the screen-sized block of tiles the player is in.
+    const WorldPosition& camera = state->camera_pos;
     const WorldPosition& player_pos = state->player_pos;
-    const u32 screen_min_tile_x = player_pos.abs_tile_x - (player_pos.abs_tile_x % k_screen_tile_cols);
-    const u32 screen_min_tile_y = player_pos.abs_tile_y - (player_pos.abs_tile_y % k_screen_tile_rows);
-    const f32 tile_side = world.tile_side_in_pixels;
+    const f32 tile_side = world.tile_side_in_pixels * state->debug_zoom;
+    const f32 m2p = world.meters_to_pixels * state->debug_zoom;
+    // The camera point lands here on screen.
+    const f32 center_x = 0.5f * static_cast<f32>(buffer.width);
+    const f32 center_y = 0.5f * static_cast<f32>(buffer.height);
 
-    // World y points up but the pixel buffer is top-down, so rows are drawn
-    // upward from the bottom edge of the screen block.
-    const f32 screen_bottom = y_offset + static_cast<f32>(k_screen_tile_rows) * tile_side;
+    // Enough tiles to cover the buffer outward from the center, plus one for
+    // the partial tiles at the edges.
+    const i32 half_cols = static_cast<i32>(ceilf(center_x / tile_side)) + 1;
+    const i32 half_rows = static_cast<i32>(ceilf(center_y / tile_side)) + 1;
 
-    for (u32 row = 0; row < k_screen_tile_rows; row++) {
-        for (u32 col = 0; col < k_screen_tile_cols; col++) {
-            f32 color = 0.5f;
-            if (is_tile_wall(world, screen_min_tile_x + col, screen_min_tile_y + row)) {
-                color = 1.0f;
+    for (i32 rel_row = -half_rows; rel_row <= half_rows; rel_row++) {
+        for (i32 rel_col = -half_cols; rel_col <= half_cols; rel_col++) {
+            // Going below tile 0 wraps to a chunk that doesn't exist.
+            const u32 tile_x = camera.abs_tile_x + static_cast<u32>(rel_col);
+            const u32 tile_y = camera.abs_tile_y + static_cast<u32>(rel_row);
+
+            // Debug colors: dark blue where no chunk exists, dark red for
+            // tiles in an allocated chunk that nothing wrote.
+            f32 r = 0.1f;
+            f32 g = 0.1f;
+            f32 b = 0.3f;
+            u32 value = 0;
+            if (get_tile_value(world, tile_x, tile_y, value)) {
+                switch (value) {
+                case k_tile_empty:
+                    r = g = b = 0.5f;
+                    break;
+                case k_tile_wall:
+                    r = g = b = 1.0f;
+                    break;
+                default:
+                    r = 0.4f;
+                    g = 0.1f;
+                    b = 0.1f;
+                    break;
+                }
+            }
+            if (tile_x == player_pos.abs_tile_x && tile_y == player_pos.abs_tile_y) {
+                r = g = b = 0.75f;
             }
 
-            if (screen_min_tile_x + col == player_pos.abs_tile_x && screen_min_tile_y + row == player_pos.abs_tile_y) {
-                color = 0.75f;
-            }
+            // Bottom-left corner of the tile relative to the camera, in
+            // pixels. World y points up but the pixel buffer is top-down.
+            const f32 x_min = center_x + static_cast<f32>(rel_col) * tile_side - m2p * camera.tile_rel_x;
+            const f32 y_max = center_y - static_cast<f32>(rel_row) * tile_side + m2p * camera.tile_rel_y;
 
-            f32 x_min = x_offset + static_cast<f32>(col) * tile_side;
-            f32 x_max = x_min + tile_side;
-            f32 y_max = screen_bottom - static_cast<f32>(row) * tile_side;
-            f32 y_min = y_max - tile_side;
-
-            render_rect(buffer, x_min, y_min, x_max, y_max, color, color, color);
+            render_rect(buffer, x_min, y_max - tile_side, x_min + tile_side, y_max, r, g, b);
         }
     }
 
     // draw player
-    const f32 m2p = world.meters_to_pixels;
-    const f32 player_x =
-        static_cast<f32>(player_pos.abs_tile_x - screen_min_tile_x) * tile_side + m2p * player_pos.tile_rel_x;
-    // Height of the player's feet above the bottom edge of the screen block.
-    const f32 player_y =
-        static_cast<f32>(player_pos.abs_tile_y - screen_min_tile_y) * tile_side + m2p * player_pos.tile_rel_y;
-    const f32 player_left = x_offset + player_x - 0.5f * m2p * player_width;
-    const f32 player_top = screen_bottom - player_y - m2p * player_height;
+    const WorldDifference player_from_camera = subtract(world, player_pos, camera);
+    const f32 player_ground_x = center_x + m2p * player_from_camera.dx;
+    const f32 player_ground_y = center_y - m2p * player_from_camera.dy;
+    const f32 player_left = player_ground_x - 0.5f * m2p * player_width;
+    const f32 player_top = player_ground_y - m2p * player_height;
     constexpr f32 player_color_r = 1.0f;
     constexpr f32 player_color_g = 1.0f;
     constexpr f32 player_color_b = 0.0f;

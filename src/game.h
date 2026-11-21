@@ -68,6 +68,8 @@ struct AudioState {
 struct GameState {
     arena::Arena permanent_arena;  // remainder of Storage::main after GameState
     WorldPosition player_pos;      // bottom-center of the player
+    WorldPosition camera_pos;      // world point drawn at the center of the screen
+    f32 debug_zoom;                // render scale; < 1 zooms out to inspect the map
     World world;
 };
 static_assert(arena::ArenaType<GameState>);

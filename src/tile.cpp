@@ -27,7 +27,7 @@ ChunkPosition get_chunk_position(u32 abs_tile_x, u32 abs_tile_y) {
 }
 
 // Value of every tile in a newly created chunk.
-constexpr u32 k_default_tile_value = 1;  // wall
+constexpr u32 k_default_tile_value = k_tile_uninitialized;
 
 // Finds the chunk at (chunk_x, chunk_y). If it doesn't exist yet, creates it
 // from `arena` when one is given, and returns null otherwise.
@@ -90,13 +90,7 @@ void set_tile_value(arena::Arena& arena, World& world, u32 abs_tile_x, u32 abs_t
 
 bool is_tile_empty(World& world, u32 abs_tile_x, u32 abs_tile_y) {
     u32 value = 0;
-    bool res = get_tile_value(world, abs_tile_x, abs_tile_y, value) && value == 0;
-    return res;
-}
-
-bool is_tile_wall(World& world, u32 abs_tile_x, u32 abs_tile_y) {
-    u32 value = 0;
-    bool res = get_tile_value(world, abs_tile_x, abs_tile_y, value) && value == 1;
+    bool res = get_tile_value(world, abs_tile_x, abs_tile_y, value) && value == k_tile_empty;
     return res;
 }
 
@@ -126,6 +120,24 @@ WorldPosition offset(World& world, WorldPosition pos, f32 dx, f32 dy) {
 
 bool is_world_pos_empty(World& world, WorldPosition pos) {
     bool res = is_tile_empty(world, pos.abs_tile_x, pos.abs_tile_y);
+    return res;
+}
+
+// a - b, in meters.
+struct WorldDifference {
+    f32 dx;
+    f32 dy;
+};
+
+WorldDifference subtract(World& world, const WorldPosition& a, const WorldPosition& b) {
+    // Subtracting as u32 and reinterpreting as i32 gives the signed distance
+    // even across a wrap.
+    f32 tiles_dx = static_cast<f32>(static_cast<i32>(a.abs_tile_x - b.abs_tile_x));
+    f32 tiles_dy = static_cast<f32>(static_cast<i32>(a.abs_tile_y - b.abs_tile_y));
+    WorldDifference res = {
+        .dx = tiles_dx * world.tile_side_in_meters + (a.tile_rel_x - b.tile_rel_x),
+        .dy = tiles_dy * world.tile_side_in_meters + (a.tile_rel_y - b.tile_rel_y),
+    };
     return res;
 }
 
