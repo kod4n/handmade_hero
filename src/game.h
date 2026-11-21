@@ -66,7 +66,7 @@ struct AudioState {
 
 // Always the first allocation in Storage::main.
 struct GameState {
-    Arena permanent_arena;  // remainder of Storage::main after GameState
+    Arena permanent_arena;     // remainder of Storage::main after GameState
     WorldPosition player_pos;  // bottom-center of the player
     World world;
 };

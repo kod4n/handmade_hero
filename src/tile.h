@@ -8,7 +8,7 @@ constexpr u8 k_screen_tile_cols = 17;
 constexpr u8 k_screen_tile_rows = 9;
 
 constexpr f32 k_tile_side_in_meters = 1.4f;
-constexpr i32 k_tile_side_in_pixels = 60;
+constexpr f32 k_tile_side_in_pixels = 60.0f;
 
 // Chunks are k_chunk_dim x k_chunk_dim tiles. An absolute tile coordinate
 // keeps the chunk index in its high bits and the tile within the chunk in

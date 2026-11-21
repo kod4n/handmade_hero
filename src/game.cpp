@@ -79,7 +79,7 @@ extern "C" void game_render(
         World& world = state->world;
         world.tile_side_in_meters = k_tile_side_in_meters;
         world.tile_side_in_pixels = k_tile_side_in_pixels;
-        world.meters_to_pixels = static_cast<f32>(world.tile_side_in_pixels) / world.tile_side_in_meters;
+        world.meters_to_pixels = world.tile_side_in_pixels / world.tile_side_in_meters;
         // world.chunk_hash starts empty: storage.main comes zeroed from the
         // platform. Chunks are created as the screens below write into them,
         // and new chunks start out as all wall.
@@ -196,9 +196,9 @@ extern "C" void game_render(
 
     // Show the screen-sized block of tiles the player is in.
     const WorldPosition& player_pos = state->player_pos;
-    const u32 screen_min_tile_x = (player_pos.abs_tile_x / k_screen_tile_cols) * k_screen_tile_cols;
-    const u32 screen_min_tile_y = (player_pos.abs_tile_y / k_screen_tile_rows) * k_screen_tile_rows;
-    const f32 tile_side = static_cast<f32>(world.tile_side_in_pixels);
+    const u32 screen_min_tile_x = player_pos.abs_tile_x - (player_pos.abs_tile_x % k_screen_tile_cols);
+    const u32 screen_min_tile_y = player_pos.abs_tile_y - (player_pos.abs_tile_y % k_screen_tile_rows);
+    const f32 tile_side = world.tile_side_in_pixels;
 
     // World y points up but the pixel buffer is top-down, so rows are drawn
     // upward from the bottom edge of the screen block.
