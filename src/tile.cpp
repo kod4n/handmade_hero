@@ -12,14 +12,16 @@ namespace hh {
 struct ChunkPosition {
     u32 chunk_x;
     u32 chunk_y;
+    u32 chunk_z;
     u32 tile_x;
     u32 tile_y;
 };
 
-ChunkPosition get_chunk_position(u32 abs_tile_x, u32 abs_tile_y) {
+ChunkPosition get_chunk_position(u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
     ChunkPosition res = {
         .chunk_x = abs_tile_x >> k_chunk_shift,
         .chunk_y = abs_tile_y >> k_chunk_shift,
+        .chunk_z = abs_tile_z,
         .tile_x = abs_tile_x & k_chunk_mask,
         .tile_y = abs_tile_y & k_chunk_mask,
     };
@@ -29,16 +31,16 @@ ChunkPosition get_chunk_position(u32 abs_tile_x, u32 abs_tile_y) {
 // Value of every tile in a newly created chunk.
 constexpr u32 k_default_tile_value = k_tile_uninitialized;
 
-// Finds the chunk at (chunk_x, chunk_y). If it doesn't exist yet, creates it
-// from `arena` when one is given, and returns null otherwise.
-TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y, arena::Arena* arena = nullptr) {
-    u32 hash = chunk_x * 19 + chunk_y * 7 + (chunk_x >> 8) * 3;
+// Finds the chunk at (chunk_x, chunk_y, chunk_z). If it doesn't exist yet,
+// creates it from `arena` when one is given, and returns null otherwise.
+TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y, u32 chunk_z, arena::Arena* arena = nullptr) {
+    u32 hash = chunk_x * 19 + chunk_y * 7 + chunk_z * 3;
     TileChunk* chunk = &world.chunk_hash[hash & (k_chunk_hash_size - 1)];
 
     // Walk the chain. An unused head slot can be claimed directly; otherwise
     // a new chunk gets appended after the last one.
     while (chunk->tiles) {
-        if (chunk->chunk_x == chunk_x && chunk->chunk_y == chunk_y) {
+        if (chunk->chunk_x == chunk_x && chunk->chunk_y == chunk_y && chunk->chunk_z == chunk_z) {
             return chunk;
         }
         if (!chunk->next) {
@@ -61,17 +63,18 @@ TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y, arena::Arena* 
     std::fill(tiles.begin(), tiles.end(), k_default_tile_value);
     chunk->chunk_x = chunk_x;
     chunk->chunk_y = chunk_y;
+    chunk->chunk_z = chunk_z;
     chunk->tiles = tiles.data();
     chunk->next = nullptr;
     return chunk;
 }
 
 // Returns false, leaving value untouched, when no chunk holds the tile.
-bool get_tile_value(World& world, u32 abs_tile_x, u32 abs_tile_y, u32& value) {
+bool get_tile_value(World& world, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z, u32& value) {
     bool res = false;
 
-    ChunkPosition pos = get_chunk_position(abs_tile_x, abs_tile_y);
-    TileChunk* chunk = get_tile_chunk(world, pos.chunk_x, pos.chunk_y);
+    ChunkPosition pos = get_chunk_position(abs_tile_x, abs_tile_y, abs_tile_z);
+    TileChunk* chunk = get_tile_chunk(world, pos.chunk_x, pos.chunk_y, pos.chunk_z);
     if (chunk) {
         value = chunk->tiles[pos.tile_y * k_chunk_dim + pos.tile_x];
         res = true;
@@ -81,16 +84,23 @@ bool get_tile_value(World& world, u32 abs_tile_x, u32 abs_tile_y, u32& value) {
 }
 
 // Creates the tile's chunk from `arena` if it doesn't exist yet.
-void set_tile_value(arena::Arena& arena, World& world, u32 abs_tile_x, u32 abs_tile_y, u32 value) {
-    ChunkPosition pos = get_chunk_position(abs_tile_x, abs_tile_y);
-    TileChunk* chunk = get_tile_chunk(world, pos.chunk_x, pos.chunk_y, &arena);
+void set_tile_value(arena::Arena& arena, World& world, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z, u32 value) {
+    ChunkPosition pos = get_chunk_position(abs_tile_x, abs_tile_y, abs_tile_z);
+    TileChunk* chunk = get_tile_chunk(world, pos.chunk_x, pos.chunk_y, pos.chunk_z, &arena);
     assert(chunk);
     chunk->tiles[pos.tile_y * k_chunk_dim + pos.tile_x] = value;
 }
 
-bool is_tile_empty(World& world, u32 abs_tile_x, u32 abs_tile_y) {
+bool get_tile_value(World& world, const WorldPosition& pos, u32& value) {
+    return get_tile_value(world, pos.abs_tile_x, pos.abs_tile_y, pos.abs_tile_z, value);
+}
+
+// Floor and stairs can be walked on; walls, unwritten tiles and missing
+// chunks can't.
+bool is_tile_walkable(World& world, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
     u32 value = 0;
-    bool res = get_tile_value(world, abs_tile_x, abs_tile_y, value) && value == k_tile_empty;
+    bool res = get_tile_value(world, abs_tile_x, abs_tile_y, abs_tile_z, value)
+        && (value == k_tile_empty || value == k_tile_stairs_up || value == k_tile_stairs_down);
     return res;
 }
 
@@ -118,12 +128,12 @@ WorldPosition offset(World& world, WorldPosition pos, f32 dx, f32 dy) {
     return pos;
 }
 
-bool is_world_pos_empty(World& world, WorldPosition pos) {
-    bool res = is_tile_empty(world, pos.abs_tile_x, pos.abs_tile_y);
+bool is_world_pos_walkable(World& world, const WorldPosition& pos) {
+    bool res = is_tile_walkable(world, pos.abs_tile_x, pos.abs_tile_y, pos.abs_tile_z);
     return res;
 }
 
-// a - b, in meters.
+// a - b, in meters, within a level: z is ignored.
 struct WorldDifference {
     f32 dx;
     f32 dy;

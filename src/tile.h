@@ -27,10 +27,15 @@ static_assert((k_chunk_hash_size & (k_chunk_hash_size - 1)) == 0);
 constexpr u32 k_tile_empty = 0;
 constexpr u32 k_tile_wall = 1;
 constexpr u32 k_tile_uninitialized = 2;  // in an allocated chunk, but never written
+constexpr u32 k_tile_stairs_up = 3;      // stepping onto it moves to z + 1
+constexpr u32 k_tile_stairs_down = 4;    // stepping onto it moves to z - 1
 
+// z isn't chunked: every level has its own chunks, so chunk_z is the absolute
+// tile z.
 struct TileChunk {
     u32 chunk_x;
     u32 chunk_y;
+    u32 chunk_z;
     u32* tiles;       // k_chunk_dim * k_chunk_dim, row-major; null marks an unused slot
     TileChunk* next;  // next chunk whose coordinate hashes to the same slot
 };
@@ -57,6 +62,7 @@ struct World {
 struct WorldPosition {
     u32 abs_tile_x;
     u32 abs_tile_y;
+    u32 abs_tile_z;  // level; changes only through stairs
     f32 tile_rel_x;
     f32 tile_rel_y;
 };

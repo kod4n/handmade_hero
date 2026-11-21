@@ -71,6 +71,7 @@ extern "C" void game_render(
         state->player_pos = {
             .abs_tile_x = 2,
             .abs_tile_y = 2,
+            .abs_tile_z = 0,
             .tile_rel_x = 0.25f,
             .tile_rel_y = 0.25f,
         };
@@ -85,29 +86,39 @@ extern "C" void game_render(
         // platform. Chunks are created as the screens below write into them,
         // and new chunks start out as all wall.
 
-        // Generate a path of walled screens. Each screen opens a door on its
-        // right or top edge, chosen from the random table, and the next
-        // screen opens the matching door on its left or bottom edge. Row 0 is
-        // the bottom of a screen.
+        // Generate a path of walled screens across two levels (z 0 and 1).
+        // Each screen leaves through a door on its right or top edge, or
+        // through stairs to the same screen on the other level, chosen from
+        // the random table. The next screen opens the matching door on its
+        // left or bottom edge, or the opposite stairs in the same spot. Row 0
+        // is the bottom of a screen.
         //
         // The path only moves right or up: stepping left/down from screen 0
-        // would wrap the u32 tile coordinates.
+        // would wrap the u32 tile coordinates. Two level changes in a row
+        // would lead back onto the screen just generated, so stairs are never
+        // chosen right after arriving by stairs.
         constexpr u32 screen_count = 100;
         constexpr u32 door_col = k_screen_tile_cols / 2;
         constexpr u32 door_row = k_screen_tile_rows / 2;
+        constexpr u32 stairs_col = k_screen_tile_cols / 2 + 4;
+        constexpr u32 stairs_row = k_screen_tile_rows / 2 + 2;
         RandomSeries series = {};
         u32 screen_x = 0;
         u32 screen_y = 0;
+        u32 screen_z = 0;
         bool door_left = false;
         bool door_bottom = false;
+        u32 arrival_stairs = k_tile_empty;  // stairs this screen was entered by, if any
         for (u32 screen = 0; screen < screen_count; screen++) {
             bool door_right = false;
             bool door_top = false;
-            if (random_choice(series, 2) == 0) {
-                door_right = true;
-            } else {
-                door_top = true;
+            bool take_stairs = false;
+            switch (random_choice(series, arrival_stairs == k_tile_empty ? 3 : 2)) {
+            case 0: door_right = true; break;
+            case 1: door_top = true; break;
+            default: take_stairs = true; break;
             }
+            const u32 departure_stairs = screen_z == 0 ? k_tile_stairs_up : k_tile_stairs_down;
 
             for (u32 row = 0; row < k_screen_tile_rows; row++) {
                 for (u32 col = 0; col < k_screen_tile_cols; col++) {
@@ -118,22 +129,36 @@ extern "C" void game_render(
                     if ((row == 0 && door_bottom) || (row == k_screen_tile_rows - 1 && door_top)) {
                         wall = wall && col != door_col;
                     }
+                    u32 value = wall ? k_tile_wall : k_tile_empty;
+                    if (col == stairs_col && row == stairs_row) {
+                        if (take_stairs) {
+                            value = departure_stairs;
+                        } else if (arrival_stairs != k_tile_empty) {
+                            value = arrival_stairs;
+                        }
+                    }
                     set_tile_value(
                         state->permanent_arena,
                         world,
                         screen_x * k_screen_tile_cols + col,
                         screen_y * k_screen_tile_rows + row,
-                        wall ? k_tile_wall : k_tile_empty
+                        screen_z,
+                        value
                     );
                 }
             }
 
             door_left = door_right;
             door_bottom = door_top;
+            arrival_stairs = k_tile_empty;
             if (door_right) {
                 screen_x++;
-            } else {
+            } else if (door_top) {
                 screen_y++;
+            } else {
+                // The other level's screen has stairs leading back here.
+                arrival_stairs = departure_stairs == k_tile_stairs_up ? k_tile_stairs_down : k_tile_stairs_up;
+                screen_z = 1 - screen_z;
             }
         }
 
@@ -198,9 +223,23 @@ extern "C" void game_render(
         WorldPosition new_left = offset(world, new_pos, -0.5f * player_width, 0.0f);
         WorldPosition new_right = offset(world, new_pos, 0.5f * player_width, 0.0f);
 
-        if (is_world_pos_empty(world, new_pos) && is_world_pos_empty(world, new_left)
-            && is_world_pos_empty(world, new_right)) {
+        if (is_world_pos_walkable(world, new_pos) && is_world_pos_walkable(world, new_left)
+            && is_world_pos_walkable(world, new_right)) {
+            const WorldPosition old_pos = state->player_pos;
             state->player_pos = new_pos;
+
+            // Stairs trigger only when stepping onto them. Arriving on the
+            // other level puts the player on the matching stairs, which
+            // doesn't count as a step, so it can't bounce straight back.
+            bool changed_tile = new_pos.abs_tile_x != old_pos.abs_tile_x || new_pos.abs_tile_y != old_pos.abs_tile_y;
+            u32 value = 0;
+            if (changed_tile && get_tile_value(world, new_pos, value)) {
+                if (value == k_tile_stairs_up) {
+                    state->player_pos.abs_tile_z++;
+                } else if (value == k_tile_stairs_down) {
+                    state->player_pos.abs_tile_z--;
+                }
+            }
         }
     }
 
@@ -211,6 +250,8 @@ extern "C" void game_render(
         WorldDifference to_player = subtract(world, state->player_pos, state->camera_pos);
         f32 t = 1.0f - expf(-camera_stiffness * input.frame_dt);
         state->camera_pos = offset(world, state->camera_pos, t * to_player.dx, t * to_player.dy);
+        // Levels don't ease; the view switches with the player.
+        state->camera_pos.abs_tile_z = state->player_pos.abs_tile_z;
     }
 
     // clear
@@ -241,13 +282,23 @@ extern "C" void game_render(
             f32 g = 0.1f;
             f32 b = 0.3f;
             u32 value = 0;
-            if (get_tile_value(world, tile_x, tile_y, value)) {
+            if (get_tile_value(world, tile_x, tile_y, camera.abs_tile_z, value)) {
                 switch (value) {
                 case k_tile_empty:
                     r = g = b = 0.5f;
                     break;
                 case k_tile_wall:
                     r = g = b = 1.0f;
+                    break;
+                case k_tile_stairs_up:
+                    r = 0.3f;
+                    g = 0.8f;
+                    b = 0.3f;
+                    break;
+                case k_tile_stairs_down:
+                    r = 0.2f;
+                    g = 0.5f;
+                    b = 0.8f;
                     break;
                 default:
                     r = 0.4f;
