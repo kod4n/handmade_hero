@@ -6,6 +6,25 @@
 
 namespace hh {
 
+// Center of the room (one screen of tiles) that pos is in.
+static WorldPosition room_center(World& world, const WorldPosition& pos) {
+    const u32 room_x = pos.abs_tile_x / k_screen_tile_cols;
+    const u32 room_y = pos.abs_tile_y / k_screen_tile_rows;
+    const WorldPosition room_corner = {
+        .abs_tile_x = room_x * k_screen_tile_cols,
+        .abs_tile_y = room_y * k_screen_tile_rows,
+        .abs_tile_z = pos.abs_tile_z,
+        .tile_rel_x = 0.0f,
+        .tile_rel_y = 0.0f,
+    };
+    return offset(
+        world,
+        room_corner,
+        0.5f * k_screen_tile_cols * world.tile_side_in_meters,
+        0.5f * k_screen_tile_rows * world.tile_side_in_meters
+    );
+}
+
 extern "C" void game_sound(AudioBuffer& audio, AudioState& state) {
     const f32 phase_step = 2.0f * k_pi * state.tone_hz / static_cast<f32>(audio.samples_per_second);
 
@@ -54,13 +73,16 @@ extern "C" void game_render(
             .tile_rel_x = 0.25f,
             .tile_rel_y = 0.25f,
         };
-        state->camera_pos = state->player_pos;
         state->debug_zoom = 1.0f;
 
         World& world = state->world;
         world.tile_side_in_meters = k_tile_side_in_meters;
         world.tile_side_in_pixels = k_tile_side_in_pixels;
         world.meters_to_pixels = world.tile_side_in_pixels / world.tile_side_in_meters;
+
+        // Start already framing the first room instead of easing in to it.
+        state->camera_mode = CameraMode::Room;
+        state->camera_pos = room_center(world, state->player_pos);
         // world.chunk_hash starts empty: storage.main comes zeroed from the
         // platform. Chunks are created as the screens below write into them,
         // and new chunks start out as all wall.
@@ -173,6 +195,10 @@ extern "C" void game_render(
         if (pressed(Action::RightShoulder)) {
             state->debug_zoom = std::clamp(state->debug_zoom * 2.0f, min_zoom, 1.0f);
         }
+        // Start (C) switches between framing the room and following the player.
+        if (pressed(Action::Start)) {
+            state->camera_mode = state->camera_mode == CameraMode::Room ? CameraMode::Follow : CameraMode::Room;
+        }
         f32 player_speed = 6.0f;  // meters per second
         f32 dx = 0.0f;
         f32 dy = 0.0f;
@@ -245,13 +271,17 @@ extern "C" void game_render(
         }
     }
 
-    // Ease the camera toward the player. 1 - exp(-k * dt) closes the same
-    // fraction of the gap per second regardless of frame rate.
+    // Ease the camera toward its target: the player's room, or the player.
+    // Entering a new room moves the target, so the camera scrolls over to it.
+    // 1 - exp(-k * dt) closes the same fraction of the gap per second
+    // regardless of frame rate.
     {
         constexpr f32 camera_stiffness = 8.0f;  // 1/s, higher = tighter follow
-        WorldDifference to_player = subtract(world, state->player_pos, state->camera_pos);
+        const WorldPosition target =
+            state->camera_mode == CameraMode::Room ? room_center(world, state->player_pos) : state->player_pos;
+        WorldDifference to_target = subtract(world, target, state->camera_pos);
         f32 t = 1.0f - expf(-camera_stiffness * input.frame_dt);
-        state->camera_pos = offset(world, state->camera_pos, t * to_player.dx, t * to_player.dy);
+        state->camera_pos = offset(world, state->camera_pos, t * to_target.dx, t * to_target.dy);
         // Levels don't ease; the view switches with the player.
         state->camera_pos.abs_tile_z = state->player_pos.abs_tile_z;
     }

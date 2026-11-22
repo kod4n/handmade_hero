@@ -928,6 +928,10 @@ static void win32_process_message(ControllerInput& kb, Win32State& state) {
                 win32_process_kb_button(input_action(kb, Action::RightShoulder), is_down);
             } break;
 
+            case 'C': {
+                win32_process_kb_button(input_action(kb, Action::Start), is_down);
+            } break;
+
             case VK_UP: {
                 win32_process_kb_button(input_action(kb, Action::ActionUp), is_down);
             } break;
@@ -1028,6 +1032,7 @@ static void win32_poll_gamepads(Input& curr_input, const Input& prev_input) {
         {XINPUT_GAMEPAD_B, Action::ActionRight},
         {XINPUT_GAMEPAD_LEFT_SHOULDER, Action::LeftShoulder},
         {XINPUT_GAMEPAD_RIGHT_SHOULDER, Action::RightShoulder},
+        {XINPUT_GAMEPAD_START, Action::Start},
     };
 
     for (DWORD idx = 0; idx < max_gamepads; idx++) {

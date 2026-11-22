@@ -100,7 +100,7 @@ bool get_tile_value(World& world, const WorldPosition& pos, u32& value) {
 bool is_tile_walkable(World& world, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
     u32 value = 0;
     bool res = get_tile_value(world, abs_tile_x, abs_tile_y, abs_tile_z, value)
-        && (value == k_tile_empty || value == k_tile_stairs_up || value == k_tile_stairs_down);
+               && (value == k_tile_empty || value == k_tile_stairs_up || value == k_tile_stairs_down);
     return res;
 }
 

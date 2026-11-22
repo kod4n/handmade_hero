@@ -80,6 +80,7 @@ enum class Action : u8 {
     MoveRight,
     LeftShoulder,
     RightShoulder,
+    Start,
     Count,  // this must remain the terminal enum value
 };
 

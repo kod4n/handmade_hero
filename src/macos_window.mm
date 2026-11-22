@@ -11,6 +11,7 @@ enum MacOSKeyCode : u16 {
   k_key_a = 0x00,
   k_key_s = 0x01,
   k_key_d = 0x02,
+  k_key_c = 0x08,
   k_key_q = 0x0C,
   k_key_w = 0x0D,
   k_key_e = 0x0E,
@@ -51,6 +52,9 @@ static void macos_process_key(u16 key_code, bool is_down) {
     break;
   case k_key_e:
     macos_process_kb_button(input_action(kb, Action::RightShoulder), is_down);
+    break;
+  case k_key_c:
+    macos_process_kb_button(input_action(kb, Action::Start), is_down);
     break;
   case k_key_up:
     macos_process_kb_button(input_action(kb, Action::ActionUp), is_down);
@@ -155,6 +159,9 @@ void macos_poll_gamepads(Input &curr_input, const Input &prev_input) {
     macos_process_pad_button(pad.rightShoulder.isPressed,
                              input_action(old_input, Action::RightShoulder),
                              input_action(new_input, Action::RightShoulder));
+    macos_process_pad_button(pad.buttonMenu.isPressed,
+                             input_action(old_input, Action::Start),
+                             input_action(new_input, Action::Start));
   }
 }
 

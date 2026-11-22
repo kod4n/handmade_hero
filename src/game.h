@@ -20,11 +20,17 @@ enum class Facing : u32 {
     Count,
 };
 
+enum class CameraMode : u32 {
+    Room,    // centered on the room (screen) the player is in
+    Follow,  // centered on the player
+};
+
 // Always the first allocation in Storage::main.
 struct GameState {
     arena::Arena permanent_arena;  // remainder of Storage::main after GameState
     WorldPosition player_pos;      // bottom-center of the player
     WorldPosition camera_pos;      // world point drawn at the center of the screen
+    CameraMode camera_mode;        // what camera_pos eases toward; Start toggles it
     f32 debug_zoom;                // render scale; < 1 zooms out to inspect the map
     World world;
     LoadedBitmap background;
