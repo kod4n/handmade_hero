@@ -1,29 +1,14 @@
 #pragma once
 
+#include "platform.h"  // IWYU pragma: export
 #include "types.h"
 #include "arena.h"
 #include "tile.h"
-#include <cassert>
 #include <numbers>
-#include <span>
 
 namespace hh {
 
 inline constexpr f32 k_pi = std::numbers::pi_v<f32>;
-inline constexpr u32 k_max_controllers = 4;
-
-#if DEV
-struct ReadFileResult {
-    u32 size;
-    void* content;
-};
-
-// Platform services the game calls. The game lives in its own DLL on Windows,
-// so it can't link against platform functions directly; they're passed in here.
-using DevPlatformReadFile = ReadFileResult(const char* filename);
-using DevPlatformFreeFile = void(void* memory);
-using DevPlatformWriteFile = bool(const char* filename, u32 size, void* memory);
-#endif
 
 #pragma pack(push, 1)
 struct BitmapHeader {
@@ -37,54 +22,24 @@ struct BitmapHeader {
     i32 height;
     u16 planes;
     u16 bits_per_pixel;
+    u32 compression;
+    u32 size_of_bitmap;
+    i32 horz_resolution;
+    i32 vert_resolution;
+    u32 colors_used;
+    u32 colors_important;
+    // Only meaningful when compression is BI_BITFIELDS (3).
+    u32 red_mask;
+    u32 green_mask;
+    u32 blue_mask;
 };
 #pragma pack(pop)
-static_assert(sizeof(BitmapHeader) == 30);
+static_assert(sizeof(BitmapHeader) == 66);
 
 struct LoadedBitmap {
     u32* pixels;  // 0xAARRGGBB, top-down rows, width * height, in the arena
     u32 width;
     u32 height;
-};
-
-
-// Owned by the platform layer, so it survives game code reloads.
-struct Storage {
-    bool is_initialized;
-    u64 main_size;
-    void* main;
-    u64 transient_size;
-    void* transient;
-
-#if DEV
-    DevPlatformReadFile* dev_read_file;
-    DevPlatformFreeFile* dev_free_file;
-    DevPlatformWriteFile* dev_write_file;
-#endif
-};
-
-struct ScreenBuffer {
-    std::span<u32> pixels;  // 0xAARRGGBB, top-down rows
-    u32 width;
-    u32 height;
-    u32 pitch;  // pixels per row
-};
-
-// One interleaved stereo frame.
-struct AudioFrame {
-    i16 left;
-    i16 right;
-};
-
-struct AudioBuffer {
-    std::span<AudioFrame> frames;
-    u32 samples_per_second;
-};
-
-struct AudioState {
-    f32 t_sine = 0.0f;
-    f32 tone_hz = 256.0f;
-    f32 tone_volume = 500.0f;
 };
 
 // Always the first allocation in Storage::main.
@@ -94,63 +49,9 @@ struct GameState {
     WorldPosition camera_pos;      // world point drawn at the center of the screen
     f32 debug_zoom;                // render scale; < 1 zooms out to inspect the map
     World world;
-    LoadedBitmap test_bitmap;
+    LoadedBitmap background;
+    LoadedBitmap hero;
 };
 static_assert(arena::ArenaType<GameState>);
 
-struct ActionState {
-    i32 half_transition_count;
-    bool ended_down;
-};
-
-enum class Action : u8 {
-    ActionUp,
-    ActionDown,
-    ActionLeft,
-    ActionRight,
-    MoveUp,
-    MoveDown,
-    MoveLeft,
-    MoveRight,
-    LeftShoulder,
-    RightShoulder,
-    Count,  // this must remain the terminal enum value
-};
-
-struct ControllerInput {
-    bool is_analog;
-    bool is_connected;
-
-    // stick positions
-    f32 stick_avg_x;
-    f32 stick_avg_y;
-
-    ActionState actions[static_cast<u8>(Action::Count)];
-};
-
-inline ActionState& input_action(ControllerInput& controller, Action a) {
-    assert(a < Action::Count);
-    return controller.actions[static_cast<u8>(a)];
-}
-
-inline const ActionState& input_action(const ControllerInput& controller, Action a) {
-    assert(a < Action::Count);
-    return controller.actions[static_cast<u8>(a)];
-}
-
-struct Input {
-    ControllerInput controllers[k_max_controllers];
-    f32 frame_dt;
-};
-
-// Game entry points. On Windows they're exported from game.dll with C linkage
-// (unmangled names) and looked up with GetProcAddress, so the platform only
-// ever refers to them through these function types.
-using GameSound = void(AudioBuffer& buffer, AudioState& state);
-using GameRender = void(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state);
-
-inline u32 safe_truncate(u64 value) {
-    assert(value <= UINT32_MAX);
-    return static_cast<u32>(value);
-}
 }  // namespace hh

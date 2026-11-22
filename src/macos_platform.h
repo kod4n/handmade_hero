@@ -1,6 +1,6 @@
 #pragma once
 
-#include "game.h"
+#include "platform.h"
 
 struct MacOSWindow {
     void* native_window = nullptr;

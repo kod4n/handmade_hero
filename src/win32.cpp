@@ -1,5 +1,5 @@
 #include "defer.h"
-#include "game.h"
+#include "platform.h"
 
 #define NOMINMAX
 #include <math.h>

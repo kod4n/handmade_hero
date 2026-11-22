@@ -26,6 +26,3 @@ consteval u64 operator""_GB(u64 amount) {
 consteval u64 operator""_TB(u64 amount) {
     return amount * 1024_GB;
 }
-
-// useful macros
-#define min(a, b) (((a) < (b)) ? (a) : (b))
