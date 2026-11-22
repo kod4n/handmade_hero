@@ -1,190 +1,10 @@
 #include "game.h"
 #include "random.h"
-#include "defer.h"
-#include "intrinsics.h"
 #include "tile.cpp"
+#include "render.cpp"
+#include "asset.cpp"
 
 namespace hh {
-
-static u32 pack_color(u8 r, u8 g, u8 b, u8 a = 0) {
-    return (static_cast<u32>(a) << 24 | static_cast<u32>(r) << 16 | static_cast<u32>(g) << 8 | static_cast<u32>(b));
-}
-
-#if DEV
-// Copies the pixels into the arena as top-down rows, then frees the file. The
-// file's pixel data can start at an offset that isn't 4-aligned, so it's only
-// read through memcpy; the copy is aligned and can be indexed directly.
-static LoadedBitmap load_bmp(
-    arena::Arena& arena,
-    DevPlatformReadFile* read_file,
-    DevPlatformFreeFile* free_file,
-    const char* filename
-) {
-    LoadedBitmap result = {};
-    ReadFileResult res = read_file(filename);
-    if (!res.content) {
-        return result;
-    }
-    defer(free_file(res.content));
-    if (res.size < sizeof(BitmapHeader)) {
-        return result;
-    }
-
-    const u8* content = static_cast<const u8*>(res.content);
-    const BitmapHeader* header = reinterpret_cast<const BitmapHeader*>(content);
-    if (header->file_type != 0x4D42 || header->bits_per_pixel != 32 || header->width <= 0 || header->height == 0) {
-        return result;
-    }
-
-    // Positive height means rows are stored bottom-up.
-    const bool bottom_up = header->height > 0;
-    const u32 width = static_cast<u32>(header->width);
-    const u32 height = bottom_up ? static_cast<u32>(header->height) : 0u - static_cast<u32>(header->height);
-    const u64 row_bytes = static_cast<u64>(width) * sizeof(u32);
-    // The header's dimensions come from the file, so check they fit in it.
-    if (header->offset > res.size || row_bytes * height > res.size - header->offset) {
-        return result;
-    }
-
-    // BI_BITFIELDS (3) stores the channel masks after the info header; BI_RGB (0)
-    // has no masks and is always 0x00RRGGBB. Anything else is unsupported.
-    constexpr u32 k_bi_rgb = 0;
-    constexpr u32 k_bi_bitfields = 3;
-    u32 red_mask = 0x00FF0000;
-    u32 green_mask = 0x0000FF00;
-    u32 blue_mask = 0x000000FF;
-    if (header->compression == k_bi_bitfields) {
-        red_mask = header->red_mask;
-        green_mask = header->green_mask;
-        blue_mask = header->blue_mask;
-    } else if (header->compression != k_bi_rgb) {
-        return result;
-    }
-    // Alpha isn't in the header (the V4 alpha mask is optional), so take
-    // whatever bits the color channels don't use.
-    const u32 alpha_mask = ~(red_mask | green_mask | blue_mask);
-
-    const BitscanResult red_shift = bitscan_forward(red_mask);
-    const BitscanResult green_shift = bitscan_forward(green_mask);
-    const BitscanResult blue_shift = bitscan_forward(blue_mask);
-    const BitscanResult alpha_shift = bitscan_forward(alpha_mask);
-    if (!red_shift.found || !green_shift.found || !blue_shift.found) {
-        return result;
-    }
-
-    std::span<u32> pixels = arena.push_array<u32>(static_cast<u64>(width) * height);
-    const u8* src = content + header->offset;
-    for (u32 y = 0; y < height; y++) {
-        const u32 src_y = bottom_up ? height - 1 - y : y;
-        u32* row = &pixels[static_cast<u64>(y) * width];
-        std::memcpy(row, src + src_y * row_bytes, row_bytes);
-        for (u32 x = 0; x < width; x++) {
-            const u32 c = row[x];
-            const u8 r = static_cast<u8>(c >> red_shift.index);
-            const u8 g = static_cast<u8>(c >> green_shift.index);
-            const u8 b = static_cast<u8>(c >> blue_shift.index);
-            const u8 a = alpha_shift.found ? static_cast<u8>(c >> alpha_shift.index) : 0xFF;
-            row[x] = pack_color(r, g, b, a);
-        }
-    }
-
-    result.pixels = pixels.data();
-    result.width = width;
-    result.height = height;
-    return result;
-}
-#endif
-
-// Fills [x_min, x_max) x [y_min, y_max), clipped to the buffer.
-static void render_rect(ScreenBuffer& buffer, f32 x0, f32 y0, f32 x1, f32 y1, f32 r, f32 g, f32 b) {
-    const f32 width = static_cast<int>(buffer.width);
-    const f32 height = static_cast<int>(buffer.height);
-
-    f32 x_min = round(x0);
-    f32 x_max = round(x1);
-    f32 y_min = round(y0);
-    f32 y_max = round(y1);
-
-    x_min = std::clamp(x_min, 0.0f, width);
-    x_max = std::clamp(x_max, 0.0f, width);
-    y_min = std::clamp(y_min, 0.0f, height);
-    y_max = std::clamp(y_max, 0.0f, height);
-
-    u32 color = pack_color(
-        static_cast<u8>(round(r * 255.0f)),
-        static_cast<u8>(round(g * 255.0f)),
-        static_cast<u8>(round(b * 255.0f))
-    );
-
-    for (u32 y = y_min; y < y_max; y++) {
-        std::span<u32> row = buffer.pixels.subspan(static_cast<u32>(y) * buffer.pitch, buffer.width);
-        for (u32 x = x_min; x < x_max; x++) {
-            row[static_cast<u32>(x)] = color;
-        }
-    }
-}
-
-#if DEV
-// Stretches the bitmap over the whole buffer, nearest-neighbor. Assumes the
-// file's channel masks already match 0xAARRGGBB, as test_pattern.bmp's do.
-[[maybe_unused]] static void draw_bitmap_fullscreen(ScreenBuffer& buffer, const LoadedBitmap& bitmap) {
-    if (!bitmap.pixels) {
-        return;
-    }
-
-    for (u32 y = 0; y < buffer.height; y++) {
-        const u32 src_y = static_cast<u32>(static_cast<u64>(y) * bitmap.height / buffer.height);
-        const u32* src_row = bitmap.pixels + static_cast<u64>(src_y) * bitmap.width;
-        std::span<u32> row = buffer.pixels.subspan(static_cast<u64>(y) * buffer.pitch, buffer.width);
-        for (u32 x = 0; x < buffer.width; x++) {
-            const u32 src_x = static_cast<u32>(static_cast<u64>(x) * bitmap.width / buffer.width);
-            row[x] = src_row[src_x];
-        }
-    }
-}
-
-
-// Draws the bitmap 1:1 with its top-left corner at (x, y), clipped to the
-// buffer. Blends by the bitmap's straight (non-premultiplied) alpha. Same
-// channel-mask assumption as draw_bitmap_fullscreen.
-static void draw_bitmap(ScreenBuffer& buffer, const LoadedBitmap& bitmap, f32 x, f32 y) {
-    if (!bitmap.pixels) {
-        return;
-    }
-
-    const i32 left = static_cast<i32>(roundf(x));
-    const i32 top = static_cast<i32>(roundf(y));
-    const i32 x_min = std::clamp(left, 0, static_cast<i32>(buffer.width));
-    const i32 y_min = std::clamp(top, 0, static_cast<i32>(buffer.height));
-    const i32 x_max = std::clamp(left + static_cast<i32>(bitmap.width), 0, static_cast<i32>(buffer.width));
-    const i32 y_max = std::clamp(top + static_cast<i32>(bitmap.height), 0, static_cast<i32>(buffer.height));
-    if (x_min >= x_max || y_min >= y_max) {
-        return;
-    }
-    const u32 count = static_cast<u32>(x_max - x_min);
-
-    for (i32 dst_y = y_min; dst_y < y_max; dst_y++) {
-        const u32* src = bitmap.pixels + static_cast<u64>(dst_y - top) * bitmap.width + (x_min - left);
-        std::span<u32> dst = buffer.pixels.subspan(static_cast<u64>(dst_y) * buffer.pitch + x_min, count);
-        for (u32 i = 0; i < count; i++) {
-            const u32 s = src[i];
-            const u32 a = s >> 24;
-            if (a == 255) {
-                dst[i] = s;
-            } else if (a != 0) {
-                const u32 d = dst[i];
-                // Per channel: (s * a + d * (255 - a)) / 255, rounded.
-                auto blend = [&](u32 shift) {
-                    const u32 sc = (s >> shift) & 0xFF;
-                    const u32 dc = (d >> shift) & 0xFF;
-                    return ((sc * a + dc * (255 - a) + 127) / 255) << shift;
-                };
-                dst[i] = blend(16) | blend(8) | blend(0);
-            }
-        }
-    }
-}
-#endif
 
 extern "C" void game_sound(AudioBuffer& audio, AudioState& state) {
     const f32 phase_step = 2.0f * k_pi * state.tone_hz / static_cast<f32>(audio.samples_per_second);
@@ -214,8 +34,18 @@ extern "C" void game_render(
 #if DEV
         // Generated by tools/make_bitmaps.py.
         state->background = load_bmp(arena, storage.dev_read_file, storage.dev_free_file, "background.bmp");
-        state->hero = load_bmp(arena, storage.dev_read_file, storage.dev_free_file, "hero.bmp");
+        constexpr const char* hero_files[] = {
+            "hero_front.bmp",
+            "hero_back.bmp",
+            "hero_left.bmp",
+            "hero_right.bmp",
+        };
+        static_assert(std::size(hero_files) == static_cast<u32>(Facing::Count));
+        for (u32 i = 0; i < std::size(hero_files); i++) {
+            state->hero[i] = load_bmp(arena, storage.dev_read_file, storage.dev_free_file, hero_files[i]);
+        }
 #endif
+        state->hero_facing = Facing::Front;
         state->permanent_arena = arena;
         state->player_pos = {
             .abs_tile_x = 2,
@@ -367,6 +197,23 @@ extern "C" void game_render(
             }
         }
 
+        // Face the dominant axis of the input; with no input, keep the last
+        // facing. On an exact tie (a keyboard diagonal), keep the current
+        // facing if it's one of the two, so it doesn't flicker.
+        if (dx != 0.0f || dy != 0.0f) {
+            const Facing horizontal = dx > 0.0f ? Facing::Right : Facing::Left;
+            const Facing vertical = dy > 0.0f ? Facing::Back : Facing::Front;
+            const f32 ax = fabsf(dx);
+            const f32 ay = fabsf(dy);
+            if (ax > ay) {
+                state->hero_facing = horizontal;
+            } else if (ay > ax) {
+                state->hero_facing = vertical;
+            } else if (state->hero_facing != horizontal && state->hero_facing != vertical) {
+                state->hero_facing = horizontal;
+            }
+        }
+
         dx *= player_speed;
         dy *= player_speed;
 
@@ -411,13 +258,11 @@ extern "C" void game_render(
 
     // clear
     render_rect(buffer, 0.0f, 0.0f, buffer.width, buffer.height, 0.0f, 0.0f, 0.0f);
-#if DEV
     // Screen-space backdrop; empty tiles below are left undrawn so it shows.
+    // Bitmaps are only loaded in DEV builds; elsewhere pixels is null and
+    // the draw is a no-op.
     draw_bitmap(buffer, state->background, 0.0f, 0.0f);
     const bool has_background = state->background.pixels != nullptr;
-#else
-    const bool has_background = false;
-#endif
 
     const WorldPosition& camera = state->camera_pos;
     const WorldPosition& player_pos = state->player_pos;
@@ -492,15 +337,14 @@ extern "C" void game_render(
     const f32 player_ground_y = center_y - m2p * player_from_camera.dy;
     const f32 player_left = player_ground_x - 0.5f * m2p * player_width;
     const f32 player_top = player_ground_y - m2p * player_height;
-#if DEV
-    if (state->hero.pixels) {
-        // hero.bmp's feet touch (24, 60); the rows below hold its shadow.
+    const LoadedBitmap& hero = state->hero[static_cast<u32>(state->hero_facing)];
+    if (hero.pixels) {
+        // Every hero bitmap's feet touch (24, 60); the rows below hold its shadow.
         constexpr f32 hero_align_x = 24.0f;
         constexpr f32 hero_align_y = 60.0f;
-        draw_bitmap(buffer, state->hero, player_ground_x - hero_align_x, player_ground_y - hero_align_y);
+        draw_bitmap(buffer, hero, player_ground_x - hero_align_x, player_ground_y - hero_align_y);
         return;
     }
-#endif
     constexpr f32 player_color_r = 1.0f;
     constexpr f32 player_color_g = 1.0f;
     constexpr f32 player_color_b = 0.0f;
