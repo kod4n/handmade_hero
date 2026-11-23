@@ -7,8 +7,9 @@ pushd .\build
 set CXX=clang-cl
 REM set CXX_FLAGS=/std:c++20 -DDEV -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wno-c++98-compat -Wno-pre-c++20-compat-pedantic -FC -Zi
 REM missing-designated-field-initializers: Win32 structs have many fields that are meant to stay zero
+REM implicit-fallthrough: a switch case without break/return is an error; mark intended ones [[fallthrough]]
 REM _MSVC_STL_HARDENING_SPAN: bounds-check std::span indexing/subspan in dev builds
-set CXX_FLAGS=/std:c++20 -DDEV -D_MSVC_STL_HARDENING_SPAN=1 -W4 -Werror -GR- -EHa- -Oi -Wno-missing-designated-field-initializers -FC -Zi
+set CXX_FLAGS=/std:c++20 -DDEV -D_MSVC_STL_HARDENING_SPAN=1 -W4 -Werror -Wimplicit-fallthrough -GR- -EHa- -Oi -Wno-missing-designated-field-initializers -FC -Zi
 set LIBS=user32.lib gdi32.lib winmm.lib ole32.lib
 for %%I in (..\src\win32.cpp) do set SOURCE=%%~fI
 for %%I in (..\src\game.cpp) do set GAME_SOURCE=%%~fI

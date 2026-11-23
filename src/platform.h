@@ -12,6 +12,15 @@ namespace hh {
 
 inline constexpr u32 k_max_controllers = 4;
 
+// DEV as a constant, for `if constexpr` and initializers. Code that touches
+// DEV-only declarations (like the dev_* file functions below) still needs
+// #if DEV, since those don't exist in other builds.
+#if DEV
+inline constexpr bool k_dev_mode = true;
+#else
+inline constexpr bool k_dev_mode = false;
+#endif
+
 #if DEV
 struct ReadFileResult {
     u32 size;
@@ -115,10 +124,5 @@ struct Input {
 // ever refers to them through these function types.
 using GameSound = void(AudioBuffer& buffer, AudioState& state);
 using GameRender = void(Storage& storage, ScreenBuffer& buffer, Input& input, AudioState& audio_state);
-
-inline u32 safe_truncate(u64 value) {
-    assert(value <= UINT32_MAX);
-    return static_cast<u32>(value);
-}
 
 }  // namespace hh
