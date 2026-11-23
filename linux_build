@@ -54,9 +54,10 @@ fi
 # Generate compile_commands.json for clangd. Each -MJ fragment ends in ",",
 # so drop the trailing comma from the last one to keep the array valid JSON.
 # linux_sdl.json is left from the last platform build if this one skipped it.
+# tests.json is written by test.sh, so it only exists once the tests have run.
 {
     echo "["
-    cat game.json linux_sdl.json 2>/dev/null | sed '$ s/,$//'
+    cat game.json linux_sdl.json tests.json 2>/dev/null | sed '$ s/,$//'
     echo "]"
 } > "$ROOT_DIR/compile_commands.json"
 

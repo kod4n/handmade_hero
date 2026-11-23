@@ -13,6 +13,8 @@ set CXX_FLAGS=/std:c++20 -DDEV -D_MSVC_STL_HARDENING_SPAN=1 -W4 -Werror -Wimplic
 set LIBS=user32.lib gdi32.lib winmm.lib ole32.lib
 for %%I in (..\src\win32.cpp) do set SOURCE=%%~fI
 for %%I in (..\src\game.cpp) do set GAME_SOURCE=%%~fI
+REM Built by test.bat; only listed here so clangd knows how to parse it.
+for %%I in (..\src\tests.cpp) do set TEST_SOURCE=%%~fI
 
 REM ---- Game DLL (hot reloadable) ----
 REM lock.tmp tells the running exe not to load game.dll while it's being written.
@@ -59,6 +61,11 @@ REM = or , (e.g. -DFOO=1) don't get split by the batch for loop.
     echo     "directory": "%CD:\=/%",
     echo     "command": "%CXX% %CXX_FLAGS% -c %GAME_SOURCE:\=/%",
     echo     "file": "%GAME_SOURCE:\=/%"
+    echo   },
+    echo   {
+    echo     "directory": "%CD:\=/%",
+    echo     "command": "%CXX% %CXX_FLAGS% -c %TEST_SOURCE:\=/%",
+    echo     "file": "%TEST_SOURCE:\=/%"
     echo   }
     echo ]
 ) > ..\compile_commands.json

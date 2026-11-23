@@ -33,9 +33,10 @@ cd "$BUILD_DIR"
 
 # Generate compile_commands.json for clangd. Each fragment ends in ",", so
 # drop the trailing comma from the last one to keep the array valid JSON.
+# tests.json is written by test.sh, so it only exists once the tests have run.
 {
     echo "["
-    cat macos_handmade.json macos_window.json | sed '$ s/,$//'
+    { cat macos_handmade.json macos_window.json; cat tests.json 2>/dev/null || true; } | sed '$ s/,$//'
     echo "]"
 } > "$ROOT_DIR/compile_commands.json"
 
