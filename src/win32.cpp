@@ -1,5 +1,5 @@
 #include "defer.h"
-#include "platform.h"
+#include "platform_shared.h"
 
 #define NOMINMAX
 #include <math.h>
@@ -65,15 +65,46 @@ struct Win32Audio {
 
 static bool running;
 static Win32OffscreenBuffer global_backbuffer;
-// Black border around the blitted image, so the buffer's edges are visible.
-constexpr int k_window_gutter_x = 10;
-constexpr int k_window_gutter_y = 10;
 static Win32Audio global_audio;
 
 struct Win32WindowDim {
     int width;
     int height;
 };
+
+static WINDOWPLACEMENT global_window_pos = {.length = sizeof(global_window_pos)};
+
+static void toggle_fullscreen(HWND window) {
+    DWORD style = GetWindowLong(window, GWL_STYLE);
+    if (style & WS_OVERLAPPEDWINDOW) {
+        MONITORINFO mi = {.cbSize = sizeof(mi)};
+        if (GetWindowPlacement(window, &global_window_pos)
+            && GetMonitorInfo(MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+            SetWindowLong(window, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+            SetWindowPos(
+                window,
+                HWND_TOP,
+                mi.rcMonitor.left,
+                mi.rcMonitor.top,
+                mi.rcMonitor.right - mi.rcMonitor.left,
+                mi.rcMonitor.bottom - mi.rcMonitor.top,
+                SWP_NOOWNERZORDER | SWP_FRAMECHANGED
+            );
+        }
+    } else {
+        SetWindowLong(window, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+        SetWindowPlacement(window, &global_window_pos);
+        SetWindowPos(
+            window,
+            nullptr,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED
+        );
+    }
+}
 
 #define X_INPUT_GET_STATE(name) \
     DWORD WINAPI name(DWORD dwUserIndex [[maybe_unused]], XINPUT_STATE* pState [[maybe_unused]])
@@ -837,9 +868,8 @@ static void win32_resize_dib_section(Win32OffscreenBuffer* backbuffer, int w, in
     backbuffer->pixels = {static_cast<u32*>(memory), memory ? pixel_count : 0};
 }
 
-// Blits 1:1 instead of stretching to the window, so every pixel on screen is
-// exactly one the game wrote. Any part of the window the buffer doesn't cover
-// is cleared to black.
+// Draws the buffer where display_rect (platform.h) puts it. Any part of the
+// window the buffer doesn't cover is cleared to black.
 static void win32_display_buffer_in_window(
     HDC device_ctx,
     const Win32OffscreenBuffer& backbuffer,
@@ -848,17 +878,20 @@ static void win32_display_buffer_in_window(
 ) {
     const int width = backbuffer.width;
     const int height = backbuffer.height;
-    const int x_offset = k_window_gutter_x;
-    const int y_offset = k_window_gutter_y;
+    const DisplayRect dest = display_rect(width, height, window_width, window_height);
 
-    // Clear only the gutters around the image. Painting black over pixels the
+    // Clear only the area around the image. Painting black over pixels the
     // blit is about to cover would make them alternate every frame (flicker).
-    const int right = x_offset + width;
-    const int bottom = y_offset + height;
-    PatBlt(device_ctx, 0, 0, window_width, y_offset, BLACKNESS);   // top
-    PatBlt(device_ctx, 0, y_offset, x_offset, height, BLACKNESS);  // left
+    const int right = dest.x + dest.width;
+    const int bottom = dest.y + dest.height;
+    if (dest.y > 0) {
+        PatBlt(device_ctx, 0, 0, window_width, dest.y, BLACKNESS);  // top
+    }
+    if (dest.x > 0) {
+        PatBlt(device_ctx, 0, dest.y, dest.x, dest.height, BLACKNESS);  // left
+    }
     if (window_width > right) {
-        PatBlt(device_ctx, right, y_offset, window_width - right, height, BLACKNESS);  // right
+        PatBlt(device_ctx, right, dest.y, window_width - right, dest.height, BLACKNESS);  // right
     }
     if (window_height > bottom) {
         PatBlt(device_ctx, 0, bottom, window_width, window_height - bottom, BLACKNESS);  // bottom
@@ -866,10 +899,10 @@ static void win32_display_buffer_in_window(
 
     StretchDIBits(
         device_ctx,
-        x_offset,
-        y_offset,
-        width,
-        height,
+        dest.x,
+        dest.y,
+        dest.width,
+        dest.height,
         0,
         0,
         width,
@@ -901,6 +934,12 @@ static void win32_process_message(ControllerInput& kb, Win32State& state) {
                 bool is_alt_down = msg.lParam & (1 << 29);
                 if (is_alt_down) {
                     running = false;
+                }
+            } break;
+            case VK_RETURN: {
+                bool is_alt_down = msg.lParam & (1 << 29);
+                if (is_alt_down && is_down && msg.hwnd) {
+                    toggle_fullscreen(msg.hwnd);
                 }
             } break;
 
@@ -963,6 +1002,20 @@ static void win32_process_message(ControllerInput& kb, Win32State& state) {
     }
 }
 
+static POINT win32_window_pos(int width, int height) {
+    if (!k_dev_mode) {
+        return {.x = CW_USEDEFAULT, .y = CW_USEDEFAULT};
+    }
+
+    MONITORINFO info = {.cbSize = sizeof(info)};
+    GetMonitorInfo(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY), &info);
+    const RECT& work = info.rcWork;
+    return {
+        .x = std::max<LONG>(work.left, work.right - width),
+        .y = std::max<LONG>(work.top, work.top + (work.bottom - work.top - height) / 2),
+    };
+}
+
 LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPARAM l_param) {
     LRESULT result = 0;
     switch (message) {
@@ -974,6 +1027,16 @@ LRESULT CALLBACK window_callback(HWND window, UINT message, WPARAM w_param, LPAR
         const BYTE alpha = w_param ? 255 : 64;
         SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA);
 #endif
+    } break;
+    case WM_SETCURSOR: {
+        // Hide the cursor over the game area only, so the title bar and
+        // resize borders still show their normal cursors.
+        if (!k_dev_mode && LOWORD(l_param) == HTCLIENT) {
+            SetCursor(nullptr);
+            result = TRUE;  // handled; stops DefWindowProc restoring the class cursor
+        } else {
+            result = DefWindowProcA(window, message, w_param, l_param);
+        }
     } break;
 
     case WM_CLOSE:
@@ -1106,7 +1169,7 @@ int CALLBACK WinMain(
     defer(if (sched_is_granular) { timeEndPeriod(desired_sched_ms); });
     win32_log(LogSeverity::Info, "scheduler is granular? %s\n", sched_is_granular ? "true" : "false");
 
-    win32_resize_dib_section(&global_backbuffer, 960, 540);
+    win32_resize_dib_section(&global_backbuffer, k_backbuffer_width, k_backbuffer_height);
 
     WNDCLASS window_class = {
         // CS_OWNDC: the window keeps one DC for its whole life, so it's fetched once below.
@@ -1137,16 +1200,19 @@ int CALLBACK WinMain(
         global_backbuffer.height + 2 * k_window_gutter_y,
     };
     AdjustWindowRectEx(&window_rect, window_style, FALSE, window_ex_style);
+    const int window_width = window_rect.right - window_rect.left;
+    const int window_height = window_rect.bottom - window_rect.top;
+    const POINT window_pos = win32_window_pos(window_width, window_height);
 
     HWND window = CreateWindowEx(
         window_ex_style,
         window_class.lpszClassName,
         k_window_title,
         window_style,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        window_rect.right - window_rect.left,
-        window_rect.bottom - window_rect.top,
+        window_pos.x,
+        window_pos.y,
+        window_width,
+        window_height,
         nullptr,
         nullptr,
         h_instance,
@@ -1161,6 +1227,9 @@ int CALLBACK WinMain(
     SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
 #endif
     HDC device_ctx = GetDC(window);
+    // Nearest-neighbor when scaling up, so pixels stay hard-edged. CS_OWNDC
+    // means this DC (also the one BeginPaint returns) keeps the setting.
+    SetStretchBltMode(device_ctx, COLORONCOLOR);
 
     win32_load_xinput();
 
