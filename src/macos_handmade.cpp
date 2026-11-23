@@ -20,11 +20,11 @@
 
 using namespace hh;
 
+static constexpr const char* k_window_title = "Handmade Hero";
+
 // render constants
 static constexpr u32 k_monitor_refresh_hz = 60;
 static constexpr u32 k_game_refresh_hz = k_monitor_refresh_hz;
-static constexpr u32 k_initial_window_width = 1280;
-static constexpr u32 k_initial_window_height = 720;
 
 // audio constants
 static constexpr u32 k_audio_channels = 2;
@@ -120,8 +120,14 @@ static bool macos_init_data_dir() {
     return length > 0 && static_cast<size_t>(length) < sizeof(global_data_dir);
 }
 
-namespace HH {
-ReadFileResult dev_platform_read_file(const char* filename) {
+static void dev_platform_free_file(void* memory) {
+    if (memory) {
+        u8* block = static_cast<u8*>(memory) - k_dev_file_header_size;
+        macos_free(block, *reinterpret_cast<u64*>(block));
+    }
+}
+
+static ReadFileResult dev_platform_read_file(const char* filename) {
     ReadFileResult result = {};
     char path[PATH_MAX];
     const int length = snprintf(path, sizeof(path), "%s%s", global_data_dir, filename);
@@ -160,14 +166,7 @@ ReadFileResult dev_platform_read_file(const char* filename) {
     return result;
 }
 
-void dev_platform_free_file(void* memory) {
-    if (memory) {
-        u8* block = static_cast<u8*>(memory) - k_dev_file_header_size;
-        macos_free(block, *reinterpret_cast<u64*>(block));
-    }
-}
-
-bool dev_platform_write_file(const char* filename, u32 size, void* memory) {
+static bool dev_platform_write_file(const char* filename, u32 size, void* memory) {
     int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
         macos_log(LogSeverity::Warn, "failed to write file %s\n", filename);
@@ -178,7 +177,6 @@ bool dev_platform_write_file(const char* filename, u32 size, void* memory) {
     ssize_t bytes_written = write(fd, memory, size);
     return bytes_written == static_cast<ssize_t>(size);
 }
-}  // namespace HH
 #endif
 
 static void macos_resize_backbuffer(MacOSOffscreenBuffer& backbuffer, u32 width, u32 height) {
@@ -205,7 +203,7 @@ static void macos_resize_backbuffer(MacOSOffscreenBuffer& backbuffer, u32 width,
 
 // Fills one AudioQueue buffer from the game and queues it for playback.
 static bool macos_fill_audio_buffer(AudioQueueRef queue, AudioQueueBufferRef buffer, AudioState& state) {
-    HH::AudioBuffer game_buffer = {
+    AudioBuffer game_buffer = {
         .frames =
             {static_cast<AudioFrame*>(buffer->mAudioData), buffer->mAudioDataBytesCapacity / k_audio_bytes_per_frame},
         .samples_per_second = k_sound_samples_per_second,
@@ -292,14 +290,21 @@ static f32 macos_seconds_elapsed(u64 start, u64 end) {
 }
 
 int main() {
+    // The window starts sized to hold the buffer 1:1 inside the gutter, like
+    // the Windows build; see display_rect in platform.h.
     MacOSWindow window = {};
-    if (!macos_window_init(&window, k_initial_window_width, k_initial_window_height, "Handmade Hero")) {
+    if (!macos_window_init(
+            &window,
+            k_backbuffer_width + 2 * k_window_gutter_x,
+            k_backbuffer_height + 2 * k_window_gutter_y,
+            k_window_title
+        )) {
         macos_log(LogSeverity::Error, "failed to create macOS window\n");
         return 1;
     }
     defer(macos_window_shutdown(&window));
 
-    macos_resize_backbuffer(global_backbuffer, k_initial_window_width, k_initial_window_height);
+    macos_resize_backbuffer(global_backbuffer, k_backbuffer_width, k_backbuffer_height);
     if (global_backbuffer.pixels.empty()) {
         return 1;
     }
@@ -345,6 +350,8 @@ int main() {
     Input* prev_input = &input[1];
 
     while (window.running) {
+        curr_input->frame_dt = target_seconds_per_frame;
+
         ControllerInput* kb = &curr_input->controllers[0];
         ControllerInput* prev_kb = &prev_input->controllers[0];
         *kb = {};
@@ -392,6 +399,17 @@ int main() {
         last_counter = end_counter;
 
         macos_log(LogSeverity::Info, "%.02fms/f | %.02ffps\n", 1000.0f * seconds_per_frame, 1.0f / seconds_per_frame);
+
+        char title[256];
+        snprintf(
+            title,
+            sizeof(title),
+            "%s [%.02fms/f | %.02ffps]",
+            k_window_title,
+            1000.0f * seconds_per_frame,
+            1.0f / seconds_per_frame
+        );
+        macos_window_set_title(&window, title);
 
         std::swap(curr_input, prev_input);
     }

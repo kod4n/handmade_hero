@@ -21,8 +21,18 @@ enum MacOSKeyCode : u16 {
   k_key_up = 0x7E,    // kVK_UpArrow
 };
 
+// Keys that the window handles itself (kVK_Return, kVK_ANSI_F).
+static constexpr u16 k_key_return = 0x24;
+static constexpr u16 k_key_f = 0x03;
+
 // Keyboard controller being filled during macos_window_pump_events.
 static ControllerInput *global_kb = nullptr;
+
+#if DEV
+// The DEV window floats above other apps so it can sit over the editor, and
+// fades while another app has focus (the Windows build does the same).
+static constexpr CGFloat k_dev_unfocused_alpha = 64.0 / 255.0;
+#endif
 
 static void macos_process_kb_button(ActionState &state, bool is_down) {
   state.ended_down = is_down;
@@ -174,18 +184,49 @@ void macos_poll_gamepads(Input &curr_input, const Input &prev_input) {
 }
 @end
 
+@interface HandmadeWindowDelegate : NSObject <NSWindowDelegate> {
+@public
+  MacOSWindow *platform_window;
+}
+@end
+
+static HandmadeWindowDelegate *global_window_delegate;
+
+// A transparent cursor, used to hide the cursor over the game in non-DEV
+// builds while keeping the normal cursor over the title bar.
+[[maybe_unused]] static NSCursor *macos_blank_cursor() {
+  static NSCursor *cursor = nil;
+  if (!cursor) {
+    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)];
+    cursor = [[NSCursor alloc] initWithImage:image hotSpot:NSZeroPoint];
+  }
+  return cursor;
+}
+
 @implementation HandmadeView
 
 - (BOOL)acceptsFirstResponder {
   return YES;
 }
 
+// Top-left origin, matching display_rect and the game's top-down rows.
+- (BOOL)isFlipped {
+  return YES;
+}
+
+- (void)resetCursorRects {
+  if constexpr (!k_dev_mode) {
+    [self addCursorRect:self.bounds cursor:macos_blank_cursor()];
+  }
+}
+
 - (void)drawRect:(NSRect)dirty_rect {
   (void)dirty_rect;
 
+  [[NSColor blackColor] setFill];
+  NSRectFill(self.bounds);
+
   if (!pixels || pixel_width == 0 || pixel_height == 0) {
-    [[NSColor blackColor] setFill];
-    NSRectFill(self.bounds);
     return;
   }
 
@@ -212,13 +253,27 @@ void macos_poll_gamepads(Input &curr_input, const Input &prev_input) {
                                      nullptr, false, kCGRenderingIntentDefault);
 
     if (image) {
-      CGContextRef context = [[NSGraphicsContext currentContext] CGContext];
-      CGContextSaveGState(context);
-      CGContextSetInterpolationQuality(context, kCGInterpolationNone);
-      CGContextTranslateCTM(context, 0, NSHeight(self.bounds));
-      CGContextScaleCTM(context, 1.0, -1.0);
-      CGContextDrawImage(context, self.bounds, image);
-      CGContextRestoreGState(context);
+      // Bounds are in points: on a Retina display the 1:1 case still covers
+      // 2x2 device pixels per game pixel, scaled with nearest-neighbor.
+      const DisplayRect dest = display_rect(
+          static_cast<i32>(pixel_width), static_cast<i32>(pixel_height),
+          static_cast<i32>(NSWidth(self.bounds)),
+          static_cast<i32>(NSHeight(self.bounds)));
+
+      // respectFlipped:YES draws the image upright in this flipped view, so
+      // the first row of the buffer ends up at the top.
+      NSImage *ns_image = [[NSImage alloc] initWithCGImage:image
+                                                      size:NSZeroSize];
+      NSGraphicsContext *context = [NSGraphicsContext currentContext];
+      [context saveGraphicsState];
+      [context setImageInterpolation:NSImageInterpolationNone];
+      [ns_image drawInRect:NSMakeRect(dest.x, dest.y, dest.width, dest.height)
+                  fromRect:NSZeroRect
+                 operation:NSCompositingOperationCopy
+                  fraction:1.0
+            respectFlipped:YES
+                     hints:nil];
+      [context restoreGraphicsState];
       CGImageRelease(image);
     }
 
@@ -229,9 +284,32 @@ void macos_poll_gamepads(Input &curr_input, const Input &prev_input) {
 }
 
 - (void)keyDown:(NSEvent *)event {
-  if (!event.isARepeat) {
-    macos_process_key(event.keyCode, true);
+  if (event.isARepeat) {
+    return;
   }
+
+  // Window shortcuts, handled here instead of going to the game:
+  //   Cmd+Q                 quit (there's no menu bar to provide it)
+  //   Option+Return         toggle fullscreen (like Alt+Enter on Windows)
+  //   Ctrl+Cmd+F            toggle fullscreen (the standard macOS shortcut)
+  const NSEventModifierFlags mods =
+      event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+  const bool cmd = mods & NSEventModifierFlagCommand;
+  const bool ctrl = mods & NSEventModifierFlagControl;
+  const bool option = mods & NSEventModifierFlagOption;
+  if (cmd && event.keyCode == k_key_q) {
+    if (global_window_delegate && global_window_delegate->platform_window) {
+      global_window_delegate->platform_window->running = false;
+    }
+    return;
+  }
+  if ((option && event.keyCode == k_key_return) ||
+      (ctrl && cmd && event.keyCode == k_key_f)) {
+    [self.window toggleFullScreen:nil];
+    return;
+  }
+
+  macos_process_key(event.keyCode, true);
 }
 
 - (void)keyUp:(NSEvent *)event {
@@ -252,12 +330,6 @@ void macos_poll_gamepads(Input &curr_input, const Input &prev_input) {
 
 @end
 
-@interface HandmadeWindowDelegate : NSObject <NSWindowDelegate> {
-@public
-  MacOSWindow *platform_window;
-}
-@end
-
 @implementation HandmadeWindowDelegate
 
 - (BOOL)windowShouldClose:(id)sender {
@@ -275,9 +347,57 @@ void macos_poll_gamepads(Input &curr_input, const Input &prev_input) {
   }
 }
 
+#if DEV
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+  NSWindow *window = notification.object;
+  [window setAlphaValue:1.0];
+}
+
+- (void)windowDidResignKey:(NSNotification *)notification {
+  NSWindow *window = notification.object;
+  // Fullscreen has its own space, so there's nothing behind it to show.
+  if (!(window.styleMask & NSWindowStyleMaskFullScreen)) {
+    [window setAlphaValue:k_dev_unfocused_alpha];
+  }
+}
+
+// A floating window can't take part in a fullscreen space, so it's a normal
+// window while fullscreen and floats again afterwards.
+- (void)windowWillEnterFullScreen:(NSNotification *)notification {
+  NSWindow *window = notification.object;
+  [window setLevel:NSNormalWindowLevel];
+  [window setAlphaValue:1.0];
+}
+
+- (void)windowDidExitFullScreen:(NSNotification *)notification {
+  NSWindow *window = notification.object;
+  [window setLevel:NSFloatingWindowLevel];
+}
+#endif
+
 @end
 
-static HandmadeWindowDelegate *global_window_delegate;
+#if DEV
+// Where the DEV window opens: flush against the right edge of the screen the
+// mouse is on (the one you're working on), vertically centered, so the editor
+// stays visible on the left. Cocoa screen coordinates have a bottom-left
+// origin; visibleFrame excludes the menu bar and Dock.
+static NSPoint macos_dev_window_origin(NSSize frame_size) {
+  NSScreen *screen = NSScreen.mainScreen;
+  const NSPoint mouse = NSEvent.mouseLocation;
+  for (NSScreen *candidate in NSScreen.screens) {
+    if (NSMouseInRect(mouse, candidate.frame, NO)) {
+      screen = candidate;
+      break;
+    }
+  }
+  const NSRect visible = screen.visibleFrame;
+  return NSMakePoint(
+      MAX(NSMinX(visible), NSMaxX(visible) - frame_size.width),
+      MAX(NSMinY(visible),
+          NSMinY(visible) + (NSHeight(visible) - frame_size.height) / 2));
+}
+#endif
 
 bool macos_window_init(MacOSWindow *window, int width, int height,
                        const char *title) {
@@ -309,8 +429,16 @@ bool macos_window_init(MacOSWindow *window, int width, int height,
     [native_window setTitle:window_title ?: @"Handmade Hero"];
     // ARC owns the window; don't let -close release it a second time.
     [native_window setReleasedWhenClosed:NO];
-    [native_window center];
     [native_window setAcceptsMouseMovedEvents:YES];
+    [native_window
+        setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
+#if DEV
+    [native_window setLevel:NSFloatingWindowLevel];
+    [native_window
+        setFrameOrigin:macos_dev_window_origin(native_window.frame.size)];
+#else
+    [native_window center];
+#endif
 
     HandmadeView *view = [[HandmadeView alloc] initWithFrame:content_rect];
     [view setWantsLayer:YES];
@@ -371,6 +499,20 @@ void macos_window_present(MacOSWindow *window, const ScreenBuffer &buffer) {
     [view setNeedsDisplay:YES];
     NSWindow *native_window = (__bridge NSWindow *)window->native_window;
     [native_window displayIfNeeded];
+  }
+}
+
+void macos_window_set_title(MacOSWindow *window, const char *title) {
+  if (!window || !window->native_window || !title) {
+    return;
+  }
+
+  @autoreleasepool {
+    NSWindow *native_window = (__bridge NSWindow *)window->native_window;
+    NSString *ns_title = [NSString stringWithUTF8String:title];
+    if (ns_title) {
+      [native_window setTitle:ns_title];
+    }
   }
 }
 

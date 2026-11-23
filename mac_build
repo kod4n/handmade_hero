@@ -13,8 +13,9 @@ OUTPUT="hh_macos"
 #   _LIBCPP_HARDENING_MODE                   bounds-check std::span indexing/subspan in dev builds
 #   -fno-rtti -fno-exceptions                same as -GR- -EHa-
 #   missing-designated-field-initializers    OS structs have many fields that are meant to stay zero
+#   implicit-fallthrough                     a case without break/return is an error; mark intended ones [[fallthrough]]
 CXX_FLAGS="-std=c++20 -DDEV -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG \
--g -O0 -Wall -Wextra -Werror -fno-rtti -fno-exceptions \
+-g -O0 -Wall -Wextra -Werror -Wimplicit-fallthrough -fno-rtti -fno-exceptions \
 -Wno-missing-designated-field-initializers"
 OBJCXX_FLAGS="-fobjc-arc"
 FRAMEWORKS="-framework Cocoa -framework AudioToolbox -framework GameController"
