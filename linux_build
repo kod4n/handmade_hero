@@ -1,0 +1,63 @@
+#!/bin/sh
+# Builds the Linux platform layer (SDL3) and the hot-reloadable game.so.
+#
+#   ./linux_build      (or: sh linux_build)
+#
+# Needs clang and SDL3 development files (pkg-config name: sdl3), e.g.
+#   Arch: pacman -S sdl3    Fedora: dnf install SDL3-devel
+#   Ubuntu 25.04+: apt install libsdl3-dev
+set -eu
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="$ROOT_DIR/build"
+SRC_DIR="$ROOT_DIR/src"
+
+CXX="${CXX:-clang++}"
+OUTPUT="hh_linux"
+
+# Mirrors build.bat:
+#   -DDEV                                    dev-only code paths (file I/O, fixed base address, hot reload helpers)
+#   _GLIBCXX_ASSERTIONS                      bounds-check std::span indexing/subspan in dev builds (libstdc++)
+#   -fno-rtti -fno-exceptions                same as -GR- -EHa-
+#   missing-designated-field-initializers    OS structs have many fields that are meant to stay zero
+#   implicit-fallthrough                     a case without break/return is an error; mark intended ones [[fallthrough]]
+CXX_FLAGS="-std=c++20 -DDEV -D_GLIBCXX_ASSERTIONS \
+-g -O0 -Wall -Wextra -Werror -Wimplicit-fallthrough -fno-rtti -fno-exceptions \
+-Wno-missing-designated-field-initializers"
+
+SDL_CFLAGS="$(pkg-config --cflags sdl3)"
+SDL_LIBS="$(pkg-config --libs sdl3)"
+
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+
+# ---- Game library (hot reloadable) ----
+# lock.tmp tells the running game not to load game.so while it's being written.
+# It must be removed even when the compile fails, or the game never reloads.
+echo building > lock.tmp
+# shellcheck disable=SC2086
+if ! "$CXX" $CXX_FLAGS -fPIC -shared -MJ game.json "$SRC_DIR/game.cpp" -o game.so; then
+    rm -f lock.tmp
+    exit 1
+fi
+rm -f lock.tmp
+
+# ---- Platform executable ----
+# Skipped while the game is running; game.so is what reloads.
+if pgrep -x "$OUTPUT" > /dev/null 2>&1; then
+    echo "$OUTPUT is running, skipping platform build"
+else
+    # shellcheck disable=SC2086
+    "$CXX" $CXX_FLAGS $SDL_CFLAGS -MJ linux_sdl.json "$SRC_DIR/linux_sdl.cpp" $SDL_LIBS -ldl -o "$OUTPUT"
+fi
+
+# Generate compile_commands.json for clangd. Each -MJ fragment ends in ",",
+# so drop the trailing comma from the last one to keep the array valid JSON.
+# linux_sdl.json is left from the last platform build if this one skipped it.
+{
+    echo "["
+    cat game.json linux_sdl.json 2>/dev/null | sed '$ s/,$//'
+    echo "]"
+} > "$ROOT_DIR/compile_commands.json"
+
+printf 'Built %s\n' "$BUILD_DIR/$OUTPUT"
