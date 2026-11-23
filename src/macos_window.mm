@@ -113,40 +113,40 @@ void macos_poll_gamepads(Input &curr_input, const Input &prev_input) {
 
     // stick (GameController already reports -1..1, +y up)
     constexpr f32 dead_zone = 0.24f;
-    new_input.stick_avg_x =
+    new_input.stick_avg.x =
         macos_normalize_stick(pad.leftThumbstick.xAxis.value, dead_zone);
-    new_input.stick_avg_y =
+    new_input.stick_avg.y =
         macos_normalize_stick(pad.leftThumbstick.yAxis.value, dead_zone);
 
     // dpad, overrides joystick when used
     if (pad.dpad.up.isPressed) {
       new_input.is_analog = false;
-      new_input.stick_avg_y = 1.0f;
+      new_input.stick_avg.y = 1.0f;
     }
     if (pad.dpad.down.isPressed) {
       new_input.is_analog = false;
-      new_input.stick_avg_y = -1.0f;
+      new_input.stick_avg.y = -1.0f;
     }
     if (pad.dpad.right.isPressed) {
       new_input.is_analog = false;
-      new_input.stick_avg_x = 1.0f;
+      new_input.stick_avg.x = 1.0f;
     }
     if (pad.dpad.left.isPressed) {
       new_input.is_analog = false;
-      new_input.stick_avg_x = -1.0f;
+      new_input.stick_avg.x = -1.0f;
     }
 
     constexpr f32 move_threshold = 0.5f;
-    macos_process_pad_button(new_input.stick_avg_x < -move_threshold,
+    macos_process_pad_button(new_input.stick_avg.x < -move_threshold,
                              input_action(old_input, Action::MoveLeft),
                              input_action(new_input, Action::MoveLeft));
-    macos_process_pad_button(new_input.stick_avg_x > move_threshold,
+    macos_process_pad_button(new_input.stick_avg.x > move_threshold,
                              input_action(old_input, Action::MoveRight),
                              input_action(new_input, Action::MoveRight));
-    macos_process_pad_button(new_input.stick_avg_y < -move_threshold,
+    macos_process_pad_button(new_input.stick_avg.y < -move_threshold,
                              input_action(old_input, Action::MoveDown),
                              input_action(new_input, Action::MoveDown));
-    macos_process_pad_button(new_input.stick_avg_y > move_threshold,
+    macos_process_pad_button(new_input.stick_avg.y > move_threshold,
                              input_action(old_input, Action::MoveUp),
                              input_action(new_input, Action::MoveUp));
 

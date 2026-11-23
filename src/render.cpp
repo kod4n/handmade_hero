@@ -7,31 +7,32 @@
 
 namespace hh {
 
-// Fills [x_min, x_max) x [y_min, y_max), clipped to the buffer.
-void render_rect(ScreenBuffer& buffer, f32 x0, f32 y0, f32 x1, f32 y1, f32 r, f32 g, f32 b) {
+// Fills [min, max) with color, clipped to the buffer. The fill is opaque:
+// color.a isn't blended or written yet.
+void render_rect(ScreenBuffer& buffer, Vec2 min, Vec2 max, Color color) {
     const f32 width = static_cast<int>(buffer.width);
     const f32 height = static_cast<int>(buffer.height);
 
-    f32 x_min = round(x0);
-    f32 x_max = round(x1);
-    f32 y_min = round(y0);
-    f32 y_max = round(y1);
+    f32 x_min = round(min.x);
+    f32 x_max = round(max.x);
+    f32 y_min = round(min.y);
+    f32 y_max = round(max.y);
 
     x_min = std::clamp(x_min, 0.0f, width);
     x_max = std::clamp(x_max, 0.0f, width);
     y_min = std::clamp(y_min, 0.0f, height);
     y_max = std::clamp(y_max, 0.0f, height);
 
-    u32 color = pack_color(
-        static_cast<u8>(round(r * 255.0f)),
-        static_cast<u8>(round(g * 255.0f)),
-        static_cast<u8>(round(b * 255.0f))
+    const u32 packed = pack_color(
+        static_cast<u8>(round(color.r * 255.0f)),
+        static_cast<u8>(round(color.g * 255.0f)),
+        static_cast<u8>(round(color.b * 255.0f))
     );
 
     for (u32 y = y_min; y < y_max; y++) {
         std::span<u32> row = buffer.pixels.subspan(static_cast<u32>(y) * buffer.pitch, buffer.width);
         for (u32 x = x_min; x < x_max; x++) {
-            row[static_cast<u32>(x)] = color;
+            row[static_cast<u32>(x)] = packed;
         }
     }
 }
@@ -56,13 +57,13 @@ void draw_bitmap_fullscreen(ScreenBuffer& buffer, const LoadedBitmap& bitmap) {
 // Draws the bitmap 1:1 with its top-left corner at (x, y), clipped to the
 // buffer. Blends by the bitmap's straight (non-premultiplied) alpha, in
 // approximately linear space.
-void draw_bitmap(ScreenBuffer& buffer, const LoadedBitmap& bitmap, f32 x, f32 y) {
+void draw_bitmap(ScreenBuffer& buffer, const LoadedBitmap& bitmap, Vec2 pos) {
     if (!bitmap.pixels) {
         return;
     }
 
-    const i32 left = static_cast<i32>(roundf(x));
-    const i32 top = static_cast<i32>(roundf(y));
+    const i32 left = static_cast<i32>(roundf(pos.x));
+    const i32 top = static_cast<i32>(roundf(pos.y));
     const i32 x_min = std::clamp(left, 0, static_cast<i32>(buffer.width));
     const i32 y_min = std::clamp(top, 0, static_cast<i32>(buffer.height));
     const i32 x_max = std::clamp(left + static_cast<i32>(bitmap.width), 0, static_cast<i32>(buffer.width));

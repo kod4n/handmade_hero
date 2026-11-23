@@ -307,36 +307,37 @@ static void linux_poll_gamepads(Input& curr_input, const Input& prev_input) {
         new_input.is_analog = true;
 
         // SDL's y axis points down; the game's points up.
-        new_input.stick_avg_x = linux_normalize_stick(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), k_stick_dead_zone);
-        new_input.stick_avg_y =
+        new_input.stick_avg.x =
+            linux_normalize_stick(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), k_stick_dead_zone);
+        new_input.stick_avg.y =
             -linux_normalize_stick(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY), k_stick_dead_zone);
 
         // dpad, overrides the stick when used
         if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_UP)) {
             new_input.is_analog = false;
-            new_input.stick_avg_y = 1.0f;
+            new_input.stick_avg.y = 1.0f;
         }
         if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
             new_input.is_analog = false;
-            new_input.stick_avg_y = -1.0f;
+            new_input.stick_avg.y = -1.0f;
         }
         if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
             new_input.is_analog = false;
-            new_input.stick_avg_x = 1.0f;
+            new_input.stick_avg.x = 1.0f;
         }
         if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
             new_input.is_analog = false;
-            new_input.stick_avg_x = -1.0f;
+            new_input.stick_avg.x = -1.0f;
         }
 
         // Stick pushed past the threshold also counts as a move button.
         auto process_stick_move = [&](bool is_down, Action action) {
             linux_process_digital_button(is_down, input_action(old_input, action), input_action(new_input, action));
         };
-        process_stick_move(new_input.stick_avg_x < -k_stick_move_threshold, Action::MoveLeft);
-        process_stick_move(new_input.stick_avg_x > k_stick_move_threshold, Action::MoveRight);
-        process_stick_move(new_input.stick_avg_y < -k_stick_move_threshold, Action::MoveDown);
-        process_stick_move(new_input.stick_avg_y > k_stick_move_threshold, Action::MoveUp);
+        process_stick_move(new_input.stick_avg.x < -k_stick_move_threshold, Action::MoveLeft);
+        process_stick_move(new_input.stick_avg.x > k_stick_move_threshold, Action::MoveRight);
+        process_stick_move(new_input.stick_avg.y < -k_stick_move_threshold, Action::MoveDown);
+        process_stick_move(new_input.stick_avg.y > k_stick_move_threshold, Action::MoveUp);
 
         for (const ButtonMapping& mapping : button_mappings) {
             linux_process_digital_button(
@@ -497,7 +498,12 @@ static void linux_process_audio(SDL_AudioStream* stream, GameSound* game_sound, 
 // ---- Display ---------------------------------------------------------------
 
 // Draws the buffer where display_rect (platform.h) puts it, black around it.
-static void linux_display_buffer(SDL_Window* window, SDL_Renderer* renderer, SDL_Texture* texture, const ScreenBuffer& buffer) {
+static void linux_display_buffer(
+    SDL_Window* window,
+    SDL_Renderer* renderer,
+    SDL_Texture* texture,
+    const ScreenBuffer& buffer
+) {
     SDL_UpdateTexture(texture, nullptr, buffer.pixels.data(), static_cast<int>(buffer.pitch * sizeof(u32)));
 
     // display_rect works in window coordinates; the renderer draws in pixels,
@@ -601,7 +607,11 @@ int main() {
     // XRGB: the game leaves alpha at 0 in places (render_rect), so the
     // texture must ignore it rather than blend by it.
     SDL_Texture* texture = SDL_CreateTexture(
-        renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, k_backbuffer_width, k_backbuffer_height
+        renderer,
+        SDL_PIXELFORMAT_XRGB8888,
+        SDL_TEXTUREACCESS_STREAMING,
+        k_backbuffer_width,
+        k_backbuffer_height
     );
     if (!texture) {
         linux_log(LogSeverity::Error, "SDL_CreateTexture failed: %s\n", SDL_GetError());

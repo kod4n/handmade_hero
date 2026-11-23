@@ -1,4 +1,6 @@
 #include "game.h"
+#include "render.h"
+#include "vec.h"
 #include "random.h"
 #include "tile.cpp"
 #include "render.cpp"
@@ -14,15 +16,13 @@ static WorldPosition room_center(World& world, const WorldPosition& pos) {
         .abs_tile_x = room_x * k_screen_tile_cols,
         .abs_tile_y = room_y * k_screen_tile_rows,
         .abs_tile_z = pos.abs_tile_z,
-        .tile_rel_x = 0.0f,
-        .tile_rel_y = 0.0f,
+        .tile_rel = {},
     };
-    return offset(
-        world,
-        room_corner,
-        0.5f * k_screen_tile_cols * world.tile_side_in_meters,
-        0.5f * k_screen_tile_rows * world.tile_side_in_meters
-    );
+    const Vec2 half_room_in_tiles = {
+        .x = 0.5f * k_screen_tile_cols,
+        .y = 0.5f * k_screen_tile_rows,
+    };
+    return world_pos_offset(world, room_corner, world.tile_side_in_meters * half_room_in_tiles);
 }
 
 extern "C" void game_sound(AudioBuffer& audio, AudioState& state) {
@@ -70,8 +70,7 @@ extern "C" void game_render(
             .abs_tile_x = 2,
             .abs_tile_y = 2,
             .abs_tile_z = 0,
-            .tile_rel_x = 0.25f,
-            .tile_rel_y = 0.25f,
+            .tile_rel = {.x = 0.25f, .y = 0.25f},
         };
         state->debug_zoom = 1.0f;
 
@@ -199,38 +198,36 @@ extern "C" void game_render(
         if (pressed(Action::Start)) {
             state->camera_mode = state->camera_mode == CameraMode::Room ? CameraMode::Follow : CameraMode::Room;
         }
-        f32 player_speed = 6.0f;  // meters per second
-        f32 dx = 0.0f;
-        f32 dy = 0.0f;
+        f32 player_speed = 6.0f;  // top speed, meters per second
+        Vec2 player_accel = {};
         if (controller.is_analog) {
-            dx = controller.stick_avg_x;
-            dy = controller.stick_avg_y;
+            player_accel = controller.stick_avg;
         } else {  // mkb
             if (input_action(controller, Action::ActionUp).ended_down) {
                 player_speed *= 2;
             }
             if (input_action(controller, Action::MoveLeft).ended_down) {
-                dx = -1.0f;
+                player_accel.x = -1.0f;
             }
             if (input_action(controller, Action::MoveRight).ended_down) {
-                dx = 1.0f;
+                player_accel.x = 1.0f;
             }
             if (input_action(controller, Action::MoveUp).ended_down) {
-                dy = 1.0f;
+                player_accel.y = 1.0f;
             }
             if (input_action(controller, Action::MoveDown).ended_down) {
-                dy = -1.0f;
+                player_accel.y = -1.0f;
             }
         }
 
         // Face the dominant axis of the input; with no input, keep the last
         // facing. On an exact tie (a keyboard diagonal), keep the current
         // facing if it's one of the two, so it doesn't flicker.
-        if (dx != 0.0f || dy != 0.0f) {
-            const Facing horizontal = dx > 0.0f ? Facing::Right : Facing::Left;
-            const Facing vertical = dy > 0.0f ? Facing::Back : Facing::Front;
-            const f32 ax = fabsf(dx);
-            const f32 ay = fabsf(dy);
+        if (player_accel.x != 0.0f || player_accel.y != 0.0f) {
+            const Facing horizontal = player_accel.x > 0.0f ? Facing::Right : Facing::Left;
+            const Facing vertical = player_accel.y > 0.0f ? Facing::Back : Facing::Front;
+            const f32 ax = fabsf(player_accel.x);
+            const f32 ay = fabsf(player_accel.y);
             if (ax > ay) {
                 state->hero_facing = horizontal;
             } else if (ay > ax) {
@@ -240,21 +237,44 @@ extern "C" void game_render(
             }
         }
 
-        dx *= player_speed;
-        dy *= player_speed;
+        // A keyboard diagonal is {1, 1}, length sqrt(2), so it would move
+        // ~41% faster than a single direction. Cap the input at length 1.
+        // Only longer inputs are scaled: a partly tilted stick keeps its
+        // smaller magnitude, so it still moves slower.
+        const f32 input_len_sq = length_sq(player_accel);
+        if (input_len_sq > 1.0f) {
+            player_accel *= 1.0f / sqrtf(input_len_sq);
+        }
+
+        // Input sets acceleration, and drag proportional to velocity opposes
+        // it. Velocity levels off where they cancel, at accel / drag, so
+        // accel = player_speed * drag makes player_speed the top speed. A
+        // higher drag reaches top speed and stops sooner (time constant
+        // 1 / drag, ~0.125 s here).
+        constexpr f32 player_drag = 8.0f;  // 1/s
+        player_accel *= player_speed * player_drag;
+        player_accel -= player_drag * state->player_vel;
+
+        // Constant-acceleration motion over the frame:
+        //   p' = (0.5 * a * t^2) + (v * t) + p
+        //   v' = v + (a * t)
+        const f32 dt = input.frame_dt;
+        const Vec2 player_delta = 0.5f * player_accel * square(dt) + state->player_vel * dt;
+        const Vec2 new_d_player = state->player_vel + dt * player_accel;
 
         // Crossing a map edge puts the player on the neighbouring map.
-        WorldPosition new_pos = offset(world, state->player_pos, input.frame_dt * dx, input.frame_dt * dy);
+        WorldPosition new_pos = world_pos_offset(world, state->player_pos, player_delta);
 
         // The player's position is the bottom-center of its rect, so check
         // the feet's left and right edges too, not just the center.
-        WorldPosition new_left = offset(world, new_pos, -0.5f * player_width, 0.0f);
-        WorldPosition new_right = offset(world, new_pos, 0.5f * player_width, 0.0f);
+        WorldPosition new_left = world_pos_offset(world, new_pos, {.x = -0.5f * player_width, .y = 0.0f});
+        WorldPosition new_right = world_pos_offset(world, new_pos, {.x = 0.5f * player_width, .y = 0.0f});
 
         if (is_world_pos_walkable(world, new_pos) && is_world_pos_walkable(world, new_left)
             && is_world_pos_walkable(world, new_right)) {
             const WorldPosition old_pos = state->player_pos;
             state->player_pos = new_pos;
+            state->player_vel = new_d_player;
 
             // Stairs trigger only when stepping onto them. Arriving on the
             // other level puts the player on the matching stairs, which
@@ -268,6 +288,10 @@ extern "C" void game_render(
                     state->player_pos.abs_tile_z--;
                 }
             }
+        } else {
+            // Blocked: stop dead rather than keep the speed built up against
+            // the wall, which would launch the player once it turns away.
+            state->player_vel = {};
         }
     }
 
@@ -279,33 +303,35 @@ extern "C" void game_render(
         constexpr f32 camera_stiffness = 8.0f;  // 1/s, higher = tighter follow
         const WorldPosition target =
             state->camera_mode == CameraMode::Room ? room_center(world, state->player_pos) : state->player_pos;
-        WorldDifference to_target = subtract(world, target, state->camera_pos);
         f32 t = 1.0f - expf(-camera_stiffness * input.frame_dt);
-        state->camera_pos = offset(world, state->camera_pos, t * to_target.dx, t * to_target.dy);
+        Vec2 step = t * world_pos_diff(world, target, state->camera_pos);
+        state->camera_pos = world_pos_offset(world, state->camera_pos, step);
         // Levels don't ease; the view switches with the player.
         state->camera_pos.abs_tile_z = state->player_pos.abs_tile_z;
     }
 
     // clear
-    render_rect(buffer, 0.0f, 0.0f, buffer.width, buffer.height, 0.0f, 0.0f, 0.0f);
+    render_rect(buffer, {}, buffer.size_vec(), gray_value(0.0f));
     // Screen-space backdrop; empty tiles below are left undrawn so it shows.
     // Bitmaps are only loaded in DEV builds; elsewhere pixels is null and
     // the draw is a no-op.
-    draw_bitmap(buffer, state->background, 0.0f, 0.0f);
+    draw_bitmap(buffer, state->background, Vec2{});
     const bool has_background = state->background.pixels != nullptr;
 
     const WorldPosition& camera = state->camera_pos;
     const WorldPosition& player_pos = state->player_pos;
     const f32 tile_side = world.tile_side_in_pixels * state->debug_zoom;
     const f32 m2p = world.meters_to_pixels * state->debug_zoom;
+    // Meters to pixels per axis. y is negated: world y points up, but the
+    // pixel buffer is top-down.
+    const Vec2 world_to_screen = {.x = m2p, .y = -m2p};
     // The camera point lands here on screen.
-    const f32 center_x = 0.5f * static_cast<f32>(buffer.width);
-    const f32 center_y = 0.5f * static_cast<f32>(buffer.height);
+    const Vec2 screen_center = 0.5f * buffer.size_vec();
 
     // Enough tiles to cover the buffer outward from the center, plus one for
     // the partial tiles at the edges.
-    const i32 half_cols = static_cast<i32>(ceilf(center_x / tile_side)) + 1;
-    const i32 half_rows = static_cast<i32>(ceilf(center_y / tile_side)) + 1;
+    const i32 half_cols = static_cast<i32>(ceilf(screen_center.x / tile_side)) + 1;
+    const i32 half_rows = static_cast<i32>(ceilf(screen_center.y / tile_side)) + 1;
 
     for (i32 rel_row = -half_rows; rel_row <= half_rows; rel_row++) {
         for (i32 rel_col = -half_cols; rel_col <= half_cols; rel_col++) {
@@ -315,9 +341,7 @@ extern "C" void game_render(
 
             // Debug colors: dark blue where no chunk exists, dark red for
             // tiles in an allocated chunk that nothing wrote.
-            f32 r = 0.1f;
-            f32 g = 0.1f;
-            f32 b = 0.3f;
+            Color tile_color = {.r = 0.1f, .g = 0.1f, .b = 0.3f};
             u32 value = 0;
             const bool is_player_tile = tile_x == player_pos.abs_tile_x && tile_y == player_pos.abs_tile_y;
             if (get_tile_value(world, tile_x, tile_y, camera.abs_tile_z, value)) {
@@ -326,68 +350,53 @@ extern "C" void game_render(
                 }
                 switch (value) {
                 case k_tile_empty:
-                    r = g = b = 0.5f;
+                    tile_color = gray_value(0.5f);
                     break;
                 case k_tile_wall:
-                    r = g = b = 1.0f;
+                    tile_color = gray_value(1.0f);
                     break;
                 case k_tile_stairs_up:
-                    r = 0.3f;
-                    g = 0.8f;
-                    b = 0.3f;
+                    tile_color = {.r = 0.3f, .g = 0.8f, .b = 0.3f};
                     break;
                 case k_tile_stairs_down:
-                    r = 0.2f;
-                    g = 0.5f;
-                    b = 0.8f;
+                    tile_color = {.r = 0.2f, .g = 0.5f, .b = 0.8f};
                     break;
                 default:
-                    r = 0.4f;
-                    g = 0.1f;
-                    b = 0.1f;
+                    tile_color = {.r = 0.4f, .g = 0.1f, .b = 0.1f};
                     break;
                 }
             }
             if (is_player_tile) {
-                r = g = b = 0.75f;
+                tile_color = gray_value(0.75f);
             }
 
             // Bottom-left corner of the tile relative to the camera, in
             // pixels. World y points up but the pixel buffer is top-down.
-            const f32 x_min = center_x + static_cast<f32>(rel_col) * tile_side - m2p * camera.tile_rel_x;
-            const f32 y_max = center_y - static_cast<f32>(rel_row) * tile_side + m2p * camera.tile_rel_y;
+            const Vec2 corner_from_camera =
+                world.tile_side_in_meters * Vec2{static_cast<f32>(rel_col), static_cast<f32>(rel_row)}
+                - camera.tile_rel;
+            const Vec2 bottom_left = screen_center + hadamard(world_to_screen, corner_from_camera);
+            const Vec2 tile_min = {bottom_left.x, bottom_left.y - tile_side};
+            const Vec2 tile_max = {bottom_left.x + tile_side, bottom_left.y};
 
-            render_rect(buffer, x_min, y_max - tile_side, x_min + tile_side, y_max, r, g, b);
+            render_rect(buffer, tile_min, tile_max, tile_color);
         }
     }
 
     // draw player
-    const WorldDifference player_from_camera = subtract(world, player_pos, camera);
-    const f32 player_ground_x = center_x + m2p * player_from_camera.dx;
-    const f32 player_ground_y = center_y - m2p * player_from_camera.dy;
-    const f32 player_left = player_ground_x - 0.5f * m2p * player_width;
-    const f32 player_top = player_ground_y - m2p * player_height;
+    const Vec2 player_from_camera = world_pos_diff(world, player_pos, camera);
+    const Vec2 player_ground_pos = screen_center + hadamard(world_to_screen, player_from_camera);
+    const Vec2 player_origin = player_ground_pos - m2p * Vec2{0.5f * player_width, player_height};
+    const Vec2 player_dim = {.x = player_width, .y = player_height};
     const LoadedBitmap& hero = state->hero[static_cast<u32>(state->hero_facing)];
     if (hero.pixels) {
         // Every hero bitmap's feet touch (24, 60); the rows below hold its shadow.
-        constexpr f32 hero_align_x = 24.0f;
-        constexpr f32 hero_align_y = 60.0f;
-        draw_bitmap(buffer, hero, player_ground_x - hero_align_x, player_ground_y - hero_align_y);
+        constexpr Vec2 hero_align = {24.0f, 60.0f};
+        draw_bitmap(buffer, hero, player_ground_pos - hero_align);
         return;
     }
-    constexpr f32 player_color_r = 1.0f;
-    constexpr f32 player_color_g = 1.0f;
-    constexpr f32 player_color_b = 0.0f;
-    render_rect(
-        buffer,
-        player_left,
-        player_top,
-        player_left + m2p * player_width,
-        player_top + m2p * player_height,
-        player_color_r,
-        player_color_g,
-        player_color_b
-    );
+    constexpr Color player_color = {.r = 1.0f, .g = 1.0f, .b = 0.0f};
+    render_rect(buffer, player_origin, player_origin + m2p * player_dim, player_color);
 }
 
 // Catch signature drift between the exported functions and the types the

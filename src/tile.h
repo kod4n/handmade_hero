@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include "vec.h"
 
 namespace hh {
 
@@ -51,20 +52,19 @@ struct World {
     TileChunk chunk_hash[k_chunk_hash_size];
 };
 
-// World y points up: +y is up, both in tile coordinates and in tile_rel_y.
+// World y points up: +y is up, both in tile coordinates and in tile_rel.y.
 // Only rendering flips it to match the top-down pixel buffer.
 //
 // A position in the world: an absolute tile coordinate (chunk in the high
 // bits, tile within the chunk in the low bits) and the offset within that
 // tile in meters. Moving past tile 0 wraps the u32 around to a chunk index
 // far from anything allocated, which reads as off-world. tile_rel is always in
-// range (0 <= tile_rel < tile side); move with offset() so it stays that way.
+// range (0 <= tile_rel < tile side); move with world_pos_offset() so it stays that way.
 struct WorldPosition {
     u32 abs_tile_x;
     u32 abs_tile_y;
     u32 abs_tile_z;  // level; changes only through stairs
-    f32 tile_rel_x;
-    f32 tile_rel_y;
+    Vec2 tile_rel;
 };
 
 }  // namespace hh

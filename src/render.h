@@ -7,6 +7,19 @@ inline constexpr f32 k_render_min_x = -30.0f;
 inline constexpr f32 k_render_min_y = -30.0f;
 inline constexpr f32 k_inv_255 = 1.0f / 255.0f;
 
+// Straight (not premultiplied) color, each channel 0..1. Alpha defaults to
+// opaque, so {r, g, b} is a solid color.
+struct Color {
+    f32 r;
+    f32 g;
+    f32 b;
+    f32 a = 1.0f;
+};
+
+inline constexpr Color gray_value(f32 v) {
+    return {v, v, v};
+}
+
 struct LoadedBitmap {
     u32* pixels;  // 0xAARRGGBB, top-down rows, width * height, in the arena
     u32 width;

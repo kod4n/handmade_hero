@@ -1,6 +1,7 @@
 #pragma once
 #include "arena.h"
 #include "tile.h"
+#include "vec.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -120,11 +121,10 @@ static void recanonicalize_coord(f32 tile_side, u32& tile, f32& tile_rel) {
     assert(tile_rel >= 0.0f && tile_rel < tile_side);
 }
 
-WorldPosition offset(World& world, WorldPosition pos, f32 dx, f32 dy) {
-    pos.tile_rel_x += dx;
-    pos.tile_rel_y += dy;
-    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile_x, pos.tile_rel_x);
-    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile_y, pos.tile_rel_y);
+WorldPosition world_pos_offset(const World& world, WorldPosition pos, Vec2 delta) {
+    pos.tile_rel += delta;
+    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile_x, pos.tile_rel.x);
+    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile_y, pos.tile_rel.y);
     return pos;
 }
 
@@ -134,21 +134,14 @@ bool is_world_pos_walkable(World& world, const WorldPosition& pos) {
 }
 
 // a - b, in meters, within a level: z is ignored.
-struct WorldDifference {
-    f32 dx;
-    f32 dy;
-};
-
-WorldDifference subtract(World& world, const WorldPosition& a, const WorldPosition& b) {
+Vec2 world_pos_diff(const World& world, const WorldPosition& a, const WorldPosition& b) {
     // Subtracting as u32 and reinterpreting as i32 gives the signed distance
     // even across a wrap.
-    f32 tiles_dx = static_cast<f32>(static_cast<i32>(a.abs_tile_x - b.abs_tile_x));
-    f32 tiles_dy = static_cast<f32>(static_cast<i32>(a.abs_tile_y - b.abs_tile_y));
-    WorldDifference res = {
-        .dx = tiles_dx * world.tile_side_in_meters + (a.tile_rel_x - b.tile_rel_x),
-        .dy = tiles_dy * world.tile_side_in_meters + (a.tile_rel_y - b.tile_rel_y),
+    const Vec2 d_tiles = {
+        .x = static_cast<f32>(static_cast<i32>(a.abs_tile_x - b.abs_tile_x)),
+        .y = static_cast<f32>(static_cast<i32>(a.abs_tile_y - b.abs_tile_y)),
     };
-    return res;
+    return world.tile_side_in_meters * d_tiles + (a.tile_rel - b.tile_rel);
 }
 
 }  // namespace hh

@@ -1112,35 +1112,35 @@ static void win32_poll_gamepads(Input& curr_input, const Input& prev_input) {
         new_input.is_analog = old_input.is_analog;
 
         // stick
-        new_input.stick_avg_x = win32_normalize_xinput_stick(pad.sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
-        new_input.stick_avg_y = win32_normalize_xinput_stick(pad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+        new_input.stick_avg.x = win32_normalize_xinput_stick(pad.sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+        new_input.stick_avg.y = win32_normalize_xinput_stick(pad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
 
         // dpad, overrides the stick when used
         if (pad.wButtons & XINPUT_GAMEPAD_DPAD_UP) {
             new_input.is_analog = false;
-            new_input.stick_avg_y = 1.0f;
+            new_input.stick_avg.y = 1.0f;
         }
         if (pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) {
             new_input.is_analog = false;
-            new_input.stick_avg_y = -1.0f;
+            new_input.stick_avg.y = -1.0f;
         }
         if (pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) {
             new_input.is_analog = false;
-            new_input.stick_avg_x = 1.0f;
+            new_input.stick_avg.x = 1.0f;
         }
         if (pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) {
             new_input.is_analog = false;
-            new_input.stick_avg_x = -1.0f;
+            new_input.stick_avg.x = -1.0f;
         }
 
         // Stick pushed past the threshold also counts as a move button.
         auto process_stick_move = [&](bool is_down, Action action) {
             win32_process_digital_button(is_down, input_action(old_input, action), input_action(new_input, action));
         };
-        process_stick_move(new_input.stick_avg_x < -move_threshold, Action::MoveLeft);
-        process_stick_move(new_input.stick_avg_x > move_threshold, Action::MoveRight);
-        process_stick_move(new_input.stick_avg_y < -move_threshold, Action::MoveDown);
-        process_stick_move(new_input.stick_avg_y > move_threshold, Action::MoveUp);
+        process_stick_move(new_input.stick_avg.x < -move_threshold, Action::MoveLeft);
+        process_stick_move(new_input.stick_avg.x > move_threshold, Action::MoveRight);
+        process_stick_move(new_input.stick_avg.y < -move_threshold, Action::MoveDown);
+        process_stick_move(new_input.stick_avg.y > move_threshold, Action::MoveUp);
 
         // buttons
         for (const ButtonMapping& mapping : button_mappings) {

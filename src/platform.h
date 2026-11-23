@@ -5,6 +5,7 @@
 // the platform. Game-only state lives in game.h.
 
 #include "types.h"
+#include "vec.h"
 #include <cassert>
 #include <span>
 
@@ -54,6 +55,11 @@ struct ScreenBuffer {
     u32 width;
     u32 height;
     u32 pitch;  // pixels per row
+
+    // Width and height in pixels, as floats for drawing math.
+    Vec2 size_vec() const {
+        return {static_cast<f32>(width), static_cast<f32>(height)};
+    }
 };
 
 // One interleaved stereo frame.
@@ -98,8 +104,7 @@ struct ControllerInput {
     bool is_connected;
 
     // stick positions
-    f32 stick_avg_x;
-    f32 stick_avg_y;
+    Vec2 stick_avg;
 
     ActionState actions[static_cast<u8>(Action::Count)];
 };
