@@ -15,7 +15,7 @@ namespace hh {
 // file's pixel data can start at an offset that isn't 4-aligned, so it's only
 // read through memcpy; the copy is aligned and can be indexed directly.
 LoadedBitmap load_bmp(
-    arena::Arena& arena,
+    Arena& arena,
     DevPlatformReadFile* read_file,
     DevPlatformFreeFile* free_file,
     const char* filename

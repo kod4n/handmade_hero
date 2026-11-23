@@ -27,7 +27,7 @@ enum class CameraMode : u32 {
 
 // Always the first allocation in Storage::main.
 struct GameState {
-    arena::Arena permanent_arena;  // remainder of Storage::main after GameState
+    Arena permanent_arena;  // remainder of Storage::main after GameState
     WorldPosition player_pos;      // bottom-center of the player
     WorldPosition camera_pos;      // world point drawn at the center of the screen
     CameraMode camera_mode;        // what camera_pos eases toward; Start toggles it
@@ -37,6 +37,6 @@ struct GameState {
     LoadedBitmap hero[static_cast<u32>(Facing::Count)];
     Facing hero_facing;  // last direction moved in; kept while idle
 };
-static_assert(arena::ArenaType<GameState>);
+static_assert(ArenaType<GameState>);
 
 }  // namespace hh

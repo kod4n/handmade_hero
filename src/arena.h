@@ -5,7 +5,7 @@
 #include <cassert>
 #include <span>
 
-namespace arena {
+namespace hh {
 
 // Arena memory is raw bytes with no constructor run, so only types that can
 // begin their lifetime that way may be pushed.
@@ -18,6 +18,10 @@ struct Arena {
     u8* base;
     u64 size;
     u64 used;
+
+    static Arena make(void* memory, u64 size) {
+        return {.base = static_cast<u8*>(memory), .size = size, .used = 0};
+    }
 
     template <ArenaType T>
     T* push() {
@@ -41,8 +45,4 @@ private:
     }
 };
 
-inline Arena make(void* memory, u64 size) {
-    return {.base = static_cast<u8*>(memory), .size = size, .used = 0};
-}
-
-}  // namespace arena
+}  // namespace hh
