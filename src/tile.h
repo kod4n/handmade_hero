@@ -67,4 +67,13 @@ struct WorldPosition {
     Vec2 tile_rel;
 };
 
+// Result of try_move. On a block, wall_normal is the unit normal of the
+// wall face hit (diagonal at a corner), or zero if the probe was already
+// inside an unwalkable tile.
+struct MoveResult {
+    bool blocked;
+    WorldPosition new_pos;
+    Vec2 wall_normal;
+};
+
 }  // namespace hh

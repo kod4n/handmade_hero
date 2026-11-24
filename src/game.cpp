@@ -259,22 +259,38 @@ extern "C" void game_render(
         //   p' = (0.5 * a * t^2) + (v * t) + p
         //   v' = v + (a * t)
         const f32 dt = input.frame_dt;
-        const Vec2 player_delta = 0.5f * player_accel * square(dt) + state->player_vel * dt;
-        const Vec2 new_d_player = state->player_vel + dt * player_accel;
+        Vec2 player_delta = 0.5f * player_accel * square(dt) + state->player_vel * dt;
+        Vec2 new_d_player = state->player_vel + dt * player_accel;
 
-        // Crossing a map edge puts the player on the neighbouring map.
-        WorldPosition new_pos = world_pos_offset(world, state->player_pos, player_delta);
+        MoveResult move = try_move(world, state->player_pos, player_delta, player_width);
+        if (move.blocked) {
+            // Glide: drop the into-wall part of the velocity and of this
+            // frame's move, keeping only the part along the wall, then try
+            // again. Head-on input leaves nothing to glide with, so the
+            // player just stops against the wall; diagonal input slides.
+            // Wall friction slows the glide on top of the usual drag: it
+            // levels off at accel_along_wall / (player_drag + wall_friction),
+            // about half the free speed along the wall here. exp keeps it
+            // frame-rate independent.
+            const Vec2 n = move.wall_normal;
+            if (length_sq(n) > 0.0f) {
+                constexpr f32 wall_friction = 8.0f;  // 1/s
+                const f32 glide = expf(-wall_friction * dt);
+                new_d_player = glide * (new_d_player - dot(new_d_player, n) * n);
+                player_delta = glide * (player_delta - dot(player_delta, n) * n);
+                move = try_move(world, state->player_pos, player_delta, player_width);
+            }
+            if (move.blocked) {
+                // Still blocked (a corner, or already inside a wall): stop.
+                new_d_player = {};
+            }
+        }
+        state->player_vel = new_d_player;
 
-        // The player's position is the bottom-center of its rect, so check
-        // the feet's left and right edges too, not just the center.
-        WorldPosition new_left = world_pos_offset(world, new_pos, {.x = -0.5f * player_width, .y = 0.0f});
-        WorldPosition new_right = world_pos_offset(world, new_pos, {.x = 0.5f * player_width, .y = 0.0f});
-
-        if (is_world_pos_walkable(world, new_pos) && is_world_pos_walkable(world, new_left)
-            && is_world_pos_walkable(world, new_right)) {
+        if (!move.blocked) {
             const WorldPosition old_pos = state->player_pos;
+            const WorldPosition& new_pos = move.new_pos;
             state->player_pos = new_pos;
-            state->player_vel = new_d_player;
 
             // Stairs trigger only when stepping onto them. Arriving on the
             // other level puts the player on the matching stairs, which
@@ -288,10 +304,6 @@ extern "C" void game_render(
                     state->player_pos.abs_tile_z--;
                 }
             }
-        } else {
-            // Blocked: stop dead rather than keep the speed built up against
-            // the wall, which would launch the player once it turns away.
-            state->player_vel = {};
         }
     }
 
@@ -370,14 +382,21 @@ extern "C" void game_render(
                 tile_color = gray_value(0.75f);
             }
 
-            // Bottom-left corner of the tile relative to the camera, in
-            // pixels. World y points up but the pixel buffer is top-down.
-            const Vec2 corner_from_camera =
-                world.tile_side_in_meters * Vec2{static_cast<f32>(rel_col), static_cast<f32>(rel_row)}
-                - camera.tile_rel;
-            const Vec2 bottom_left = screen_center + hadamard(world_to_screen, corner_from_camera);
-            const Vec2 tile_min = {bottom_left.x, bottom_left.y - tile_side};
-            const Vec2 tile_max = {bottom_left.x + tile_side, bottom_left.y};
+            // Screen position of the bottom-left corner of tile (col, row)
+            // relative to the camera. World y points up but the pixel buffer
+            // is top-down. Both edges of every tile go through this, so
+            // neighbors share bit-identical edges: adding tile_side instead
+            // differs by float error (1.4 m isn't exact), and when that
+            // straddles a rounding boundary it leaves a 1px seam.
+            auto corner_on_screen = [&](i32 col, i32 row) {
+                const Vec2 corner_from_camera =
+                    world.tile_side_in_meters * Vec2{static_cast<f32>(col), static_cast<f32>(row)} - camera.tile_rel;
+                return screen_center + hadamard(world_to_screen, corner_from_camera);
+            };
+            const Vec2 bottom_left = corner_on_screen(rel_col, rel_row);
+            const Vec2 top_right = corner_on_screen(rel_col + 1, rel_row + 1);
+            const Vec2 tile_min = {bottom_left.x, top_right.y};
+            const Vec2 tile_max = {top_right.x, bottom_left.y};
 
             render_rect(buffer, tile_min, tile_max, tile_color);
         }

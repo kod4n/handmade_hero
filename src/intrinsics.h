@@ -10,6 +10,11 @@ struct BitscanResult {
     u32 index;
 };
 
+// -1, 0 or 1.
+inline constexpr i32 sign(i32 value) {
+    return (value > 0) - (value < 0);
+}
+
 inline f32 sin(f32 angle) {
     f32 res = sinf(angle);
     return res;

@@ -1,5 +1,6 @@
 #pragma once
 #include "arena.h"
+#include "intrinsics.h"
 #include "tile.h"
 #include "vec.h"
 #include <algorithm>
@@ -142,6 +143,38 @@ Vec2 world_pos_diff(const World& world, const WorldPosition& a, const WorldPosit
         .y = static_cast<f32>(static_cast<i32>(a.abs_tile_y - b.abs_tile_y)),
     };
     return world.tile_side_in_meters * d_tiles + (a.tile_rel - b.tile_rel);
+}
+
+// Tries moving an entity of the given width by delta from `from`, without
+// committing it. The position is the bottom-center of the entity, so the
+// feet's left and right edges are probed too, not just the center. On a
+// block, the normal points back along the tile step the first blocked probe
+// took, i.e. out of the wall face it entered.
+MoveResult try_move(World& world, const WorldPosition& from, Vec2 delta, f32 width) {
+    MoveResult res = {};
+    // Crossing a map edge puts the entity on the neighbouring map.
+    res.new_pos = world_pos_offset(world, from, delta);
+    for (const f32 foot_x : {0.0f, -0.5f * width, 0.5f * width}) {
+        const Vec2 foot = {.x = foot_x, .y = 0.0f};
+        const WorldPosition probe_new = world_pos_offset(world, res.new_pos, foot);
+        if (is_world_pos_walkable(world, probe_new)) {
+            continue;
+        }
+        const WorldPosition probe_old = world_pos_offset(world, from, foot);
+        const i32 step_x = static_cast<i32>(probe_new.abs_tile_x - probe_old.abs_tile_x);
+        const i32 step_y = static_cast<i32>(probe_new.abs_tile_y - probe_old.abs_tile_y);
+        res.blocked = true;
+        res.wall_normal = {
+            .x = static_cast<f32>(-sign(step_x)),
+            .y = static_cast<f32>(-sign(step_y)),
+        };
+        const f32 normal_len_sq = length_sq(res.wall_normal);
+        if (normal_len_sq > 0.0f) {
+            res.wall_normal *= 1.0f / sqrtf(normal_len_sq);
+        }
+        break;
+    }
+    return res;
 }
 
 }  // namespace hh
