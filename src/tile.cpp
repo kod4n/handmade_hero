@@ -1,6 +1,5 @@
 #pragma once
 #include "arena.h"
-#include "intrinsics.h"
 #include "tile.h"
 #include "vec.h"
 #include <algorithm>
@@ -145,35 +144,88 @@ Vec2 world_pos_diff(const World& world, const WorldPosition& a, const WorldPosit
     return world.tile_side_in_meters * d_tiles + (a.tile_rel - b.tile_rel);
 }
 
-// Tries moving an entity of the given width by delta from `from`, without
-// committing it. The position is the bottom-center of the entity, so the
-// feet's left and right edges are probed too, not just the center. On a
-// block, the normal points back along the tile step the first blocked probe
-// took, i.e. out of the wall face it entered.
-MoveResult try_move(World& world, const WorldPosition& from, Vec2 delta, f32 width) {
-    MoveResult res = {};
-    // Crossing a map edge puts the entity on the neighbouring map.
-    res.new_pos = world_pos_offset(world, from, delta);
-    for (const f32 foot_x : {0.0f, -0.5f * width, 0.5f * width}) {
-        const Vec2 foot = {.x = foot_x, .y = 0.0f};
-        const WorldPosition probe_new = world_pos_offset(world, res.new_pos, foot);
-        if (is_world_pos_walkable(world, probe_new)) {
-            continue;
+// The wall is the line x = wall_x, running from min_y to max_y;
+// the names say x/y, but the caller swaps the axes to test horizontal walls
+// with the same code. rel is the start point relative to the tile the wall belongs to.
+// normal is the wall face's outward normal: only movement into the face (against the normal)
+// can hit it, so an entity resting on a face can still step away from it,
+// and one stuck inside a wall can walk out.
+//
+// If the path crosses the wall earlier than t_min, lowers t_min to just
+// short of the crossing and reports the hit.
+static bool test_wall(
+    f32 wall_x,
+    f32 rel_x,
+    f32 rel_y,
+    f32 delta_x,
+    f32 delta_y,
+    f32 min_y,
+    f32 max_y,
+    f32 normal_x,
+    f32& t_min
+) {
+    // Backs off a little so the entity stops just in front of the wall
+    // rather than on it, where rounding could put it on either side.
+    constexpr f32 t_epsilon = 0.0001f;
+    bool hit = false;
+    if (delta_x * normal_x < 0.0f) {
+        const f32 t_result = (wall_x - rel_x) / delta_x;
+        const f32 y = rel_y + t_result * delta_y;
+        if (t_result >= 0.0f && t_min > t_result && y >= min_y && y <= max_y) {
+            t_min = std::max(0.0f, t_result - t_epsilon);
+            hit = true;
         }
-        const WorldPosition probe_old = world_pos_offset(world, from, foot);
-        const i32 step_x = static_cast<i32>(probe_new.abs_tile_x - probe_old.abs_tile_x);
-        const i32 step_y = static_cast<i32>(probe_new.abs_tile_y - probe_old.abs_tile_y);
-        res.blocked = true;
-        res.wall_normal = {
-            .x = static_cast<f32>(-sign(step_x)),
-            .y = static_cast<f32>(-sign(step_y)),
-        };
-        const f32 normal_len_sq = length_sq(res.wall_normal);
-        if (normal_len_sq > 0.0f) {
-            res.wall_normal *= 1.0f / sqrtf(normal_len_sq);
-        }
-        break;
     }
+    return hit;
+}
+
+// Moves a point by delta from `from`, stopping at the first unwalkable tile
+// along the way. Every tile in the rectangle spanned by the start and end tiles is checked,
+// and the four faces of each unwalkable one are intersected with the path, so a fast
+// move can't skip over a wall the way checking only the end point did.
+// The entity is treated as a point: its width isn't taken into account yet.
+MoveResult try_move(World& world, const WorldPosition& from, Vec2 delta) {
+    const WorldPosition to = world_pos_offset(world, from, delta);
+    const u32 min_tile_x = std::min(from.abs_tile_x, to.abs_tile_x);
+    const u32 min_tile_y = std::min(from.abs_tile_y, to.abs_tile_y);
+    const u32 one_past_max_tile_x = std::max(from.abs_tile_x, to.abs_tile_x) + 1;
+    const u32 one_past_max_tile_y = std::max(from.abs_tile_y, to.abs_tile_y) + 1;
+    const u32 abs_tile_z = from.abs_tile_z;
+    const f32 side = world.tile_side_in_meters;
+    // Tile-relative corners; tile_rel 0 is the tile's bottom-left corner.
+    const Vec2 min_corner = {};
+    const Vec2 max_corner = {.x = side, .y = side};
+
+    MoveResult res = {.t = 1.0f};
+    // != rather than <, so the loops still end if the range wraps past u32 0.
+    for (u32 abs_tile_y = min_tile_y; abs_tile_y != one_past_max_tile_y; abs_tile_y++) {
+        for (u32 abs_tile_x = min_tile_x; abs_tile_x != one_past_max_tile_x; abs_tile_x++) {
+            if (is_tile_walkable(world, abs_tile_x, abs_tile_y, abs_tile_z)) {
+                continue;
+            }
+            const WorldPosition tile_corner = {
+                .abs_tile_x = abs_tile_x,
+                .abs_tile_y = abs_tile_y,
+                .abs_tile_z = abs_tile_z,
+                .tile_rel = {},
+            };
+            const Vec2 rel = world_pos_diff(world, from, tile_corner);
+            if (test_wall(min_corner.x, rel.x, rel.y, delta.x, delta.y, min_corner.y, max_corner.y, -1.0f, res.t)) {
+                res.wall_normal = {.x = -1.0f, .y = 0.0f};
+            }
+            if (test_wall(max_corner.x, rel.x, rel.y, delta.x, delta.y, min_corner.y, max_corner.y, 1.0f, res.t)) {
+                res.wall_normal = {.x = 1.0f, .y = 0.0f};
+            }
+            if (test_wall(min_corner.y, rel.y, rel.x, delta.y, delta.x, min_corner.x, max_corner.x, -1.0f, res.t)) {
+                res.wall_normal = {.x = 0.0f, .y = -1.0f};
+            }
+            if (test_wall(max_corner.y, rel.y, rel.x, delta.y, delta.x, min_corner.x, max_corner.x, 1.0f, res.t)) {
+                res.wall_normal = {.x = 0.0f, .y = 1.0f};
+            }
+        }
+    }
+    res.blocked = res.t < 1.0f;
+    res.new_pos = res.blocked ? world_pos_offset(world, from, res.t * delta) : to;
     return res;
 }
 

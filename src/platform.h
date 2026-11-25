@@ -22,6 +22,8 @@ inline constexpr bool k_dev_mode = true;
 inline constexpr bool k_dev_mode = false;
 #endif
 
+#define array_size(a) (sizeof(a) / (sizeof(a[0])))
+
 #if DEV
 struct ReadFileResult {
     u32 size;

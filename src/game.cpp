@@ -1,4 +1,5 @@
 #include "game.h"
+#include <cmath>
 #include "render.h"
 #include "vec.h"
 #include "random.h"
@@ -23,6 +24,139 @@ static WorldPosition room_center(World& world, const WorldPosition& pos) {
         .y = 0.5f * k_screen_tile_rows,
     };
     return world_pos_offset(world, room_corner, world.tile_side_in_meters * half_room_in_tiles);
+}
+
+// Null for index 0 (the reserved "none" slot) and anything out of range.
+static Entity* get_entity(GameState& state, u32 index) {
+    Entity* entity = nullptr;
+    if (index > 0 && index < std::size(state.entities)) {
+        entity = &state.entities[index];
+    }
+    return entity;
+}
+
+// Hands out the next slot, leared. Returns 0 when every slot is taken.
+static u32 add_entity(GameState& state) {
+    u32 index = 0;
+    if (state.entity_count < std::size(state.entities)) {
+        index = state.entity_count++;
+        state.entities[index] = {};
+    }
+    return index;
+}
+
+// Where new players appear: the middle of tile (1, 3) in the first room.
+static WorldPosition player_spawn_pos(const World& world) {
+    const WorldPosition tile = {.abs_tile_x = 8, .abs_tile_y = 4, .abs_tile_z = 0, .tile_rel = {}};
+    return world_pos_offset(world, tile, 0.5f * Vec2{world.tile_side_in_meters, world.tile_side_in_meters});
+}
+
+static void init_player(GameState& state, u32 index) {
+    Entity* entity = get_entity(state, index);
+    if (!entity) {
+        return;
+    }
+    entity->exists = true;
+    entity->pos = player_spawn_pos(state.world);
+    entity->facing = Facing::Front;
+    entity->height = 1.4f;
+    entity->width = 0.75f * entity->height;
+
+    // The first player to join gets the camera.
+    if (!get_entity(state, state.camera_entity_index)) {
+        state.camera_entity_index = index;
+    }
+}
+
+// Moves an entity for one frame. input_dir is the stick or keys (capped to
+// length 1 here); speed is the top speed it leads to, in m/s.
+static void move_player(World& world, Entity& entity, f32 dt, Vec2 input_dir, f32 speed) {
+    // Face the dominant axis of the input; with no input, keep the last
+    // facing. On an exact tie (a keyboard diagonal), keep the current
+    // facing if it's one of the two, so it doesn't flicker.
+    if (input_dir.x != 0.0f || input_dir.y != 0.0f) {
+        const Facing horizontal = input_dir.x > 0.0f ? Facing::Right : Facing::Left;
+        const Facing vertical = input_dir.y > 0.0f ? Facing::Back : Facing::Front;
+        const f32 ax = fabsf(input_dir.x);
+        const f32 ay = fabsf(input_dir.y);
+        if (ax > ay) {
+            entity.facing = horizontal;
+        } else if (ay > ax) {
+            entity.facing = vertical;
+        } else if (entity.facing != horizontal && entity.facing != vertical) {
+            entity.facing = horizontal;
+        }
+    }
+
+    // A keyboard diagonal is {1, 1}, length sqrt(2), so it would move
+    // ~41% faster than a single direction. Cap the input at length 1.
+    // Only longer inputs are scaled: a partly tilted stick keeps its
+    // smaller magnitude, so it still moves slower.
+    Vec2 accel = input_dir;
+    const f32 input_len_sq = length_sq(accel);
+    if (input_len_sq > 1.0f) {
+        accel *= 1.0f / sqrtf(input_len_sq);
+    }
+
+    // Input sets acceleration, and drag proportional to velocity opposes
+    // it. Velocity levels off where they cancel, at accel / drag, so
+    // accel = speed * drag makes speed the top speed. A higher drag reaches
+    // top speed and stops sooner (time constant 1 / drag, ~0.125 s here).
+    constexpr f32 drag = 8.0f;  // 1/s
+    accel *= speed * drag;
+    accel -= drag * entity.vel;
+
+    // Constant-acceleration motion over the frame:
+    //   p' = (0.5 * a * t^2) + (v * t) + p
+    //   v' = v + (a * t)
+    Vec2 delta = 0.5f * accel * square(dt) + entity.vel * dt;
+    Vec2 new_vel = entity.vel + dt * accel;
+
+    // Search in t: travel as much of the move as fits before the first
+    // wall. The entity collides as a point (its bottom-center), so it can
+    // still overlap walls by up to half its width.
+    const WorldPosition old_pos = entity.pos;
+    MoveResult move = try_move(world, old_pos, delta);
+    if (move.blocked) {
+        // Glide: drop the into-wall part of the velocity and of the rest
+        // of this frame's move, keeping only the part along the wall,
+        // and search again from the wall. Head-on input leaves nothing
+        // to glide with, so the entity just stops against the wall;
+        // diagonal input slides. Wall friction slows the glide on top of
+        // the usual drag: it levels off at
+        // accel_along_wall / (drag + wall_friction), about half the free
+        // speed along the wall here. exp keeps it frame-rate independent.
+        constexpr f32 wall_friction = 8.0f;  // 1/s
+        const f32 glide = expf(-wall_friction * dt);
+        const Vec2 n = move.wall_normal;
+        new_vel = glide * (new_vel - dot(new_vel, n) * n);
+        Vec2 rest = (1.0f - move.t) * delta;
+        rest = glide * (rest - dot(rest, n) * n);
+        move = try_move(world, move.new_pos, rest);
+        if (move.blocked) {
+            // A second wall (e.g. a corner): stop moving into it too.
+            // Normals are axis-aligned, so this keeps the first removal.
+            const Vec2 n2 = move.wall_normal;
+            new_vel -= dot(new_vel, n2) * n2;
+        }
+    }
+    entity.vel = new_vel;
+
+    const WorldPosition& new_pos = move.new_pos;
+    entity.pos = new_pos;
+
+    // Stairs trigger only when stepping onto them. Arriving on the other
+    // level puts the entity on the matching stairs, which doesn't count as
+    // a step, so it can't bounce straight back.
+    bool changed_tile = new_pos.abs_tile_x != old_pos.abs_tile_x || new_pos.abs_tile_y != old_pos.abs_tile_y;
+    u32 value = 0;
+    if (changed_tile && get_tile_value(world, new_pos, value)) {
+        if (value == k_tile_stairs_up) {
+            entity.pos.abs_tile_z++;
+        } else if (value == k_tile_stairs_down) {
+            entity.pos.abs_tile_z--;
+        }
+    }
 }
 
 extern "C" void game_sound(AudioBuffer& audio, AudioState& state) {
@@ -64,15 +198,10 @@ extern "C" void game_render(
             state->hero[i] = load_bmp(arena, storage.dev_read_file, storage.dev_free_file, hero_files[i]);
         }
 #endif
-        state->hero_facing = Facing::Front;
         state->permanent_arena = arena;
-        state->player_pos = {
-            .abs_tile_x = 2,
-            .abs_tile_y = 2,
-            .abs_tile_z = 0,
-            .tile_rel = {.x = 0.25f, .y = 0.25f},
-        };
         state->debug_zoom = 1.0f;
+        // Slot 0 stays unused so index 0 can mean "no entity".
+        add_entity(*state);
 
         World& world = state->world;
         world.tile_side_in_meters = k_tile_side_in_meters;
@@ -81,7 +210,14 @@ extern "C" void game_render(
 
         // Start already framing the first room instead of easing in to it.
         state->camera_mode = CameraMode::Room;
-        state->camera_pos = room_center(world, state->player_pos);
+        state->camera_pos = room_center(world, player_spawn_pos(world));
+
+        // The keyboard player starts in the game; gamepads join with Start.
+        // Every platform puts the keyboard in controllers[0].
+        constexpr u32 keyboard_controller = 0;
+        const u32 keyboard_player = add_entity(*state);
+        init_player(*state, keyboard_player);
+        state->player_index_for_controller[keyboard_controller] = keyboard_player;
         // world.chunk_hash starts empty: storage.main comes zeroed from the
         // platform. Chunks are created as the screens below write into them,
         // and new chunks start out as all wall.
@@ -173,11 +309,8 @@ extern "C" void game_render(
     GameState* state = static_cast<GameState*>(storage.main);
     World& world = state->world;
 
-    // In meters.
-    const f32 player_height = 1.4f;
-    const f32 player_width = 0.75f * player_height;
-
-    for (auto& controller : input.controllers) {
+    for (u32 controller_index = 0; controller_index < std::size(input.controllers); controller_index++) {
+        ControllerInput& controller = input.controllers[controller_index];
         if (!controller.is_connected) {
             continue;
         }
@@ -194,132 +327,61 @@ extern "C" void game_render(
         if (pressed(Action::RightShoulder)) {
             state->debug_zoom = std::clamp(state->debug_zoom * 2.0f, min_zoom, 1.0f);
         }
-        // Start (C) switches between framing the room and following the player.
-        if (pressed(Action::Start)) {
+        // ActionDown (down arrow) switches between framing the room and
+        // following the player.
+        if (pressed(Action::ActionDown)) {
             state->camera_mode = state->camera_mode == CameraMode::Room ? CameraMode::Follow : CameraMode::Room;
         }
-        f32 player_speed = 6.0f;  // top speed, meters per second
-        Vec2 player_accel = {};
+
+        // Each controller drives its own player. One that has none yet
+        // joins by pressing Start (C), which spawns a new player.
+        u32& player_index = state->player_index_for_controller[controller_index];
+        Entity* player = get_entity(*state, player_index);
+        if (!player) {
+            if (pressed(Action::Start)) {
+                player_index = add_entity(*state);
+                init_player(*state, player_index);
+            }
+            continue;
+        }
+
+        f32 speed = 6.0f;  // top speed, meters per second
+        Vec2 input_dir = {};
         if (controller.is_analog) {
-            player_accel = controller.stick_avg;
+            input_dir = controller.stick_avg;
         } else {  // mkb
             if (input_action(controller, Action::ActionUp).ended_down) {
-                player_speed *= 2;
+                speed *= 2;
             }
             if (input_action(controller, Action::MoveLeft).ended_down) {
-                player_accel.x = -1.0f;
+                input_dir.x = -1.0f;
             }
             if (input_action(controller, Action::MoveRight).ended_down) {
-                player_accel.x = 1.0f;
+                input_dir.x = 1.0f;
             }
             if (input_action(controller, Action::MoveUp).ended_down) {
-                player_accel.y = 1.0f;
+                input_dir.y = 1.0f;
             }
             if (input_action(controller, Action::MoveDown).ended_down) {
-                player_accel.y = -1.0f;
+                input_dir.y = -1.0f;
             }
         }
-
-        // Face the dominant axis of the input; with no input, keep the last
-        // facing. On an exact tie (a keyboard diagonal), keep the current
-        // facing if it's one of the two, so it doesn't flicker.
-        if (player_accel.x != 0.0f || player_accel.y != 0.0f) {
-            const Facing horizontal = player_accel.x > 0.0f ? Facing::Right : Facing::Left;
-            const Facing vertical = player_accel.y > 0.0f ? Facing::Back : Facing::Front;
-            const f32 ax = fabsf(player_accel.x);
-            const f32 ay = fabsf(player_accel.y);
-            if (ax > ay) {
-                state->hero_facing = horizontal;
-            } else if (ay > ax) {
-                state->hero_facing = vertical;
-            } else if (state->hero_facing != horizontal && state->hero_facing != vertical) {
-                state->hero_facing = horizontal;
-            }
-        }
-
-        // A keyboard diagonal is {1, 1}, length sqrt(2), so it would move
-        // ~41% faster than a single direction. Cap the input at length 1.
-        // Only longer inputs are scaled: a partly tilted stick keeps its
-        // smaller magnitude, so it still moves slower.
-        const f32 input_len_sq = length_sq(player_accel);
-        if (input_len_sq > 1.0f) {
-            player_accel *= 1.0f / sqrtf(input_len_sq);
-        }
-
-        // Input sets acceleration, and drag proportional to velocity opposes
-        // it. Velocity levels off where they cancel, at accel / drag, so
-        // accel = player_speed * drag makes player_speed the top speed. A
-        // higher drag reaches top speed and stops sooner (time constant
-        // 1 / drag, ~0.125 s here).
-        constexpr f32 player_drag = 8.0f;  // 1/s
-        player_accel *= player_speed * player_drag;
-        player_accel -= player_drag * state->player_vel;
-
-        // Constant-acceleration motion over the frame:
-        //   p' = (0.5 * a * t^2) + (v * t) + p
-        //   v' = v + (a * t)
-        const f32 dt = input.frame_dt;
-        Vec2 player_delta = 0.5f * player_accel * square(dt) + state->player_vel * dt;
-        Vec2 new_d_player = state->player_vel + dt * player_accel;
-
-        MoveResult move = try_move(world, state->player_pos, player_delta, player_width);
-        if (move.blocked) {
-            // Glide: drop the into-wall part of the velocity and of this
-            // frame's move, keeping only the part along the wall, then try
-            // again. Head-on input leaves nothing to glide with, so the
-            // player just stops against the wall; diagonal input slides.
-            // Wall friction slows the glide on top of the usual drag: it
-            // levels off at accel_along_wall / (player_drag + wall_friction),
-            // about half the free speed along the wall here. exp keeps it
-            // frame-rate independent.
-            const Vec2 n = move.wall_normal;
-            if (length_sq(n) > 0.0f) {
-                constexpr f32 wall_friction = 8.0f;  // 1/s
-                const f32 glide = expf(-wall_friction * dt);
-                new_d_player = glide * (new_d_player - dot(new_d_player, n) * n);
-                player_delta = glide * (player_delta - dot(player_delta, n) * n);
-                move = try_move(world, state->player_pos, player_delta, player_width);
-            }
-            if (move.blocked) {
-                // Still blocked (a corner, or already inside a wall): stop.
-                new_d_player = {};
-            }
-        }
-        state->player_vel = new_d_player;
-
-        if (!move.blocked) {
-            const WorldPosition old_pos = state->player_pos;
-            const WorldPosition& new_pos = move.new_pos;
-            state->player_pos = new_pos;
-
-            // Stairs trigger only when stepping onto them. Arriving on the
-            // other level puts the player on the matching stairs, which
-            // doesn't count as a step, so it can't bounce straight back.
-            bool changed_tile = new_pos.abs_tile_x != old_pos.abs_tile_x || new_pos.abs_tile_y != old_pos.abs_tile_y;
-            u32 value = 0;
-            if (changed_tile && get_tile_value(world, new_pos, value)) {
-                if (value == k_tile_stairs_up) {
-                    state->player_pos.abs_tile_z++;
-                } else if (value == k_tile_stairs_down) {
-                    state->player_pos.abs_tile_z--;
-                }
-            }
-        }
+        move_player(world, *player, input.frame_dt, input_dir, speed);
     }
 
-    // Ease the camera toward its target: the player's room, or the player.
-    // Entering a new room moves the target, so the camera scrolls over to it.
-    // 1 - exp(-k * dt) closes the same fraction of the gap per second
-    // regardless of frame rate.
-    {
+    // Ease the camera toward its target: the followed player's room, or the
+    // player. Entering a new room moves the target, so the camera scrolls
+    // over to it. 1 - exp(-k * dt) closes the same fraction of the gap per
+    // second regardless of frame rate. Until someone joins, it stays put.
+    if (const Entity* followed = get_entity(*state, state->camera_entity_index)) {
         constexpr f32 camera_stiffness = 8.0f;  // 1/s, higher = tighter follow
         const WorldPosition target =
-            state->camera_mode == CameraMode::Room ? room_center(world, state->player_pos) : state->player_pos;
+            state->camera_mode == CameraMode::Room ? room_center(world, followed->pos) : followed->pos;
         f32 t = 1.0f - expf(-camera_stiffness * input.frame_dt);
         Vec2 step = t * world_pos_diff(world, target, state->camera_pos);
         state->camera_pos = world_pos_offset(world, state->camera_pos, step);
         // Levels don't ease; the view switches with the player.
-        state->camera_pos.abs_tile_z = state->player_pos.abs_tile_z;
+        state->camera_pos.abs_tile_z = followed->pos.abs_tile_z;
     }
 
     // clear
@@ -331,7 +393,9 @@ extern "C" void game_render(
     const bool has_background = state->background.pixels != nullptr;
 
     const WorldPosition& camera = state->camera_pos;
-    const WorldPosition& player_pos = state->player_pos;
+    // Slots handed out so far; slot 0 is the reserved one.
+    const u32 first_entity = 1;
+    const u32 entity_end = state->entity_count;
     const f32 tile_side = world.tile_side_in_pixels * state->debug_zoom;
     const f32 m2p = world.meters_to_pixels * state->debug_zoom;
     // Meters to pixels per axis. y is negated: world y points up, but the
@@ -355,7 +419,15 @@ extern "C" void game_render(
             // tiles in an allocated chunk that nothing wrote.
             Color tile_color = {.r = 0.1f, .g = 0.1f, .b = 0.3f};
             u32 value = 0;
-            const bool is_player_tile = tile_x == player_pos.abs_tile_x && tile_y == player_pos.abs_tile_y;
+            bool is_player_tile = false;
+            for (u32 i = first_entity; i < entity_end; i++) {
+                const Entity& e = state->entities[i];
+                if (e.exists && e.pos.abs_tile_x == tile_x && e.pos.abs_tile_y == tile_y
+                    && e.pos.abs_tile_z == camera.abs_tile_z) {
+                    is_player_tile = true;
+                    break;
+                }
+            }
             if (get_tile_value(world, tile_x, tile_y, camera.abs_tile_z, value)) {
                 if (value == k_tile_empty && has_background && !is_player_tile) {
                     continue;
@@ -402,20 +474,27 @@ extern "C" void game_render(
         }
     }
 
-    // draw player
-    const Vec2 player_from_camera = world_pos_diff(world, player_pos, camera);
-    const Vec2 player_ground_pos = screen_center + hadamard(world_to_screen, player_from_camera);
-    const Vec2 player_origin = player_ground_pos - m2p * Vec2{0.5f * player_width, player_height};
-    const Vec2 player_dim = {.x = player_width, .y = player_height};
-    const LoadedBitmap& hero = state->hero[static_cast<u32>(state->hero_facing)];
-    if (hero.pixels) {
-        // Every hero bitmap's feet touch (24, 60); the rows below hold its shadow.
-        constexpr Vec2 hero_align = {24.0f, 60.0f};
-        draw_bitmap(buffer, hero, player_ground_pos - hero_align);
-        return;
+    // Players on a different level from the camera aren't drawn.
+    for (u32 entity_index = first_entity; entity_index < entity_end; entity_index++) {
+        const Entity& entity = state->entities[entity_index];
+        if (!entity.exists || entity.pos.abs_tile_z != camera.abs_tile_z) {
+            continue;
+        }
+
+        const Vec2 from_camera = world_pos_diff(world, entity.pos, camera);
+        const Vec2 ground_pos = screen_center + hadamard(world_to_screen, from_camera);
+        const LoadedBitmap& hero = state->hero[static_cast<u32>(entity.facing)];
+        if (hero.pixels) {
+            // Every hero bitmap's feet touch (24, 60); the rows below hold its shadow.
+            constexpr Vec2 hero_align = {24.0f, 60.0f};
+            draw_bitmap(buffer, hero, ground_pos - hero_align);
+            continue;
+        }
+        const Vec2 dim = {.x = entity.width, .y = entity.height};
+        const Vec2 origin = ground_pos - m2p * Vec2{0.5f * entity.width, entity.height};
+        constexpr Color player_color = {.r = 1.0f, .g = 1.0f, .b = 0.0f};
+        render_rect(buffer, origin, origin + m2p * dim, player_color);
     }
-    constexpr Color player_color = {.r = 1.0f, .g = 1.0f, .b = 0.0f};
-    render_rect(buffer, player_origin, player_origin + m2p * player_dim, player_color);
 }
 
 // Catch signature drift between the exported functions and the types the

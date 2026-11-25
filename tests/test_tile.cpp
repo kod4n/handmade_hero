@@ -218,55 +218,111 @@ static void fill_walled_room(Arena& arena, World& world) {
     }
 }
 
-TEST(try_move_reports_wall_normals) {
+TEST(try_move_stops_at_first_wall) {
     World* world = make_world();
     defer(std::free(world));
     Arena arena = make_test_arena();
     fill_walled_room(arena, *world);
     const f32 side = world->tile_side_in_meters;
-    const f32 width = 0.5f;
     const f32 mid = 0.5f * side;
 
-    // Open floor: not blocked, and new_pos is the offset position.
+    // Open floor: not blocked, the whole move is taken.
     const WorldPosition center = {.abs_tile_x = 11, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {mid, mid}};
-    MoveResult clear = try_move(*world, center, {0.3f, -0.2f}, width);
+    MoveResult clear = try_move(*world, center, {0.3f, -0.2f});
     CHECK(!clear.blocked);
+    CHECK_EQ(clear.t, 1.0f);
     CHECK_EQ(clear.new_pos.abs_tile_x, 11);
     CHECK_NEAR(clear.new_pos.tile_rel.x, mid + 0.3f, 1e-5f);
     CHECK_NEAR(clear.new_pos.tile_rel.y, mid - 0.2f, 1e-5f);
 
-    // Into the right wall: normal points left. The right foot hits first,
-    // before the center reaches the wall tile.
+    // Into the right wall, 0.05 away with a 0.1 move: stops halfway, just
+    // short of the wall, with the normal pointing back out of it.
     const WorldPosition by_right =
-        {.abs_tile_x = 12, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {side - 0.3f, mid}};
-    MoveResult right = try_move(*world, by_right, {0.1f, 0.0f}, width);
+        {.abs_tile_x = 12, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {side - 0.05f, mid}};
+    MoveResult right = try_move(*world, by_right, {0.1f, 0.0f});
     CHECK(right.blocked);
+    CHECK_NEAR(right.t, 0.5f, 1e-3f);
+    CHECK_EQ(right.new_pos.abs_tile_x, 12);
+    CHECK(right.new_pos.tile_rel.x < side);
+    CHECK_NEAR(right.new_pos.tile_rel.x, side, 1e-4f);
     CHECK_EQ(right.wall_normal, (Vec2{-1.0f, 0.0f}));
 
     // Into the left wall: normal points right.
-    const WorldPosition by_left = {.abs_tile_x = 10, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {0.3f, mid}};
-    MoveResult left = try_move(*world, by_left, {-0.1f, 0.0f}, width);
+    const WorldPosition by_left = {.abs_tile_x = 10, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {0.05f, mid}};
+    MoveResult left = try_move(*world, by_left, {-0.1f, 0.0f});
     CHECK(left.blocked);
+    CHECK_EQ(left.new_pos.abs_tile_x, 10);
     CHECK_EQ(left.wall_normal, (Vec2{1.0f, 0.0f}));
 
     // Down into the bottom wall: normal points up (world y is up).
     const WorldPosition by_bottom = {.abs_tile_x = 11, .abs_tile_y = 10, .abs_tile_z = 0, .tile_rel = {mid, 0.05f}};
-    MoveResult bottom = try_move(*world, by_bottom, {0.0f, -0.1f}, width);
+    MoveResult bottom = try_move(*world, by_bottom, {0.0f, -0.1f});
     CHECK(bottom.blocked);
+    CHECK_EQ(bottom.new_pos.abs_tile_y, 10);
     CHECK_EQ(bottom.wall_normal, (Vec2{0.0f, 1.0f}));
 
-    // Diagonally into the top-right corner tile: unit diagonal normal.
+    // Diagonally toward the top-right corner, nearer the right wall than the
+    // top one but moving so the top face is crossed first (t 0.4 vs 0.5).
     const WorldPosition by_corner =
-        {.abs_tile_x = 12, .abs_tile_y = 12, .abs_tile_z = 0, .tile_rel = {side - 0.05f, side - 0.05f}};
-    MoveResult corner = try_move(*world, by_corner, {0.1f, 0.1f}, 0.0f);
+        {.abs_tile_x = 12, .abs_tile_y = 12, .abs_tile_z = 0, .tile_rel = {side - 0.05f, side - 0.04f}};
+    MoveResult corner = try_move(*world, by_corner, {0.1f, 0.1f});
     CHECK(corner.blocked);
-    CHECK_NEAR(corner.wall_normal, (Vec2{-0.70710678f, -0.70710678f}), 1e-6f);
+    CHECK_NEAR(corner.t, 0.4f, 1e-3f);
+    CHECK_EQ(corner.wall_normal, (Vec2{0.0f, -1.0f}));
+}
 
-    // Starting inside a wall: blocked with a zero normal.
+TEST(try_move_does_not_tunnel_through_walls) {
+    World* world = make_world();
+    defer(std::free(world));
+    Arena arena = make_test_arena();
+    fill_walled_room(arena, *world);
+    // Floor on the far side of the right wall, so the end point is walkable
+    // and only the path in between is blocked.
+    set_tile_value(arena, *world, 14, 11, 0, k_tile_empty);
+    const f32 side = world->tile_side_in_meters;
+    const f32 mid = 0.5f * side;
+
+    const WorldPosition start = {.abs_tile_x = 12, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {mid, mid}};
+    MoveResult move = try_move(*world, start, {2.0f * side, 0.0f});
+    CHECK(move.blocked);
+    CHECK_NEAR(move.t, 0.25f, 1e-3f);
+    CHECK_EQ(move.new_pos.abs_tile_x, 12);
+    CHECK_EQ(move.wall_normal, (Vec2{-1.0f, 0.0f}));
+}
+
+TEST(try_move_only_blocks_moving_into_a_face) {
+    World* world = make_world();
+    defer(std::free(world));
+    Arena arena = make_test_arena();
+    fill_walled_room(arena, *world);
+    const f32 side = world->tile_side_in_meters;
+    const f32 mid = 0.5f * side;
+
+    // Resting exactly on the left wall's face: stepping away is free...
+    const WorldPosition on_face = {.abs_tile_x = 10, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {0.0f, mid}};
+    MoveResult away = try_move(*world, on_face, {0.1f, 0.0f});
+    CHECK(!away.blocked);
+    CHECK_NEAR(away.new_pos.tile_rel.x, 0.1f, 1e-5f);
+
+    // ...and stepping into it goes nowhere.
+    MoveResult into = try_move(*world, on_face, {-0.1f, 0.0f});
+    CHECK(into.blocked);
+    CHECK_EQ(into.t, 0.0f);
+    CHECK_EQ(into.new_pos.abs_tile_x, 10);
+    CHECK_EQ(into.new_pos.tile_rel.x, 0.0f);
+
+    // Moving along a wall, parallel to its face, isn't blocked.
+    const WorldPosition by_wall = {.abs_tile_x = 10, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {0.01f, mid}};
+    MoveResult along = try_move(*world, by_wall, {0.0f, side});
+    CHECK(!along.blocked);
+    CHECK_EQ(along.new_pos.abs_tile_y, 12);
+
+    // Stuck inside a wall: the faces only block from outside, so it can
+    // walk back out onto the floor.
     const WorldPosition in_wall = {.abs_tile_x = 13, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {mid, mid}};
-    MoveResult stuck = try_move(*world, in_wall, {0.01f, 0.0f}, 0.0f);
-    CHECK(stuck.blocked);
-    CHECK_EQ(stuck.wall_normal, (Vec2{0.0f, 0.0f}));
+    MoveResult out = try_move(*world, in_wall, {-side, 0.0f});
+    CHECK(!out.blocked);
+    CHECK_EQ(out.new_pos.abs_tile_x, 12);
 }
 
 TEST(tile_values_and_walkability) {
