@@ -10,6 +10,18 @@ struct BitscanResult {
     u32 index;
 };
 
+// std::rotl/rotr compile to rol/ror and treat a negative amount as a rotate
+// the other way; unlike _rotl they also exist on the Linux/Mac builds.
+inline u32 rotate_left(u32 value, i32 amount) {
+    u32 res = std::rotl(value, amount);
+    return res;
+}
+
+inline u32 rotate_right(u32 value, i32 amount) {
+    u32 res = std::rotr(value, amount);
+    return res;
+}
+
 // -1, 0 or 1.
 inline constexpr i32 sign(i32 value) {
     return (value > 0) - (value < 0);

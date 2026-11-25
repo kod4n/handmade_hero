@@ -26,8 +26,25 @@ struct LoadedBitmap {
     u32 height;
 };
 
+// Bit position of each channel in a 0xAARRGGBB pixel.
+inline constexpr u32 k_alpha_shift = 24;
+inline constexpr u32 k_red_shift = 16;
+inline constexpr u32 k_green_shift = 8;
+inline constexpr u32 k_blue_shift = 0;
+
+// Combines channels that are already at their bit positions (k_*_shift), e.g.
+// masked out of another pixel. For plain 0..255 values use pack_color.
+inline constexpr u32 pack_shifted_color(u32 r, u32 g, u32 b, u32 a = 0) {
+    return a | r | g | b;
+}
+
 inline constexpr u32 pack_color(u8 r, u8 g, u8 b, u8 a = 0) {
-    return static_cast<u32>(a) << 24 | static_cast<u32>(r) << 16 | static_cast<u32>(g) << 8 | static_cast<u32>(b);
+    return pack_shifted_color(
+        static_cast<u32>(r) << k_red_shift,
+        static_cast<u32>(g) << k_green_shift,
+        static_cast<u32>(b) << k_blue_shift,
+        static_cast<u32>(a) << k_alpha_shift
+    );
 }
 
 }  // namespace hh

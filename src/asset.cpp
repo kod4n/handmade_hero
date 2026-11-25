@@ -72,6 +72,13 @@ LoadedBitmap load_bmp(
         return result;
     }
 
+    // Rotate each channel straight from its file position to its position in
+    // our pixels. A negative amount rotates right.
+    const i32 red_rotate = static_cast<i32>(k_red_shift) - static_cast<i32>(red_shift.index);
+    const i32 green_rotate = static_cast<i32>(k_green_shift) - static_cast<i32>(green_shift.index);
+    const i32 blue_rotate = static_cast<i32>(k_blue_shift) - static_cast<i32>(blue_shift.index);
+    const i32 alpha_rotate = static_cast<i32>(k_alpha_shift) - static_cast<i32>(alpha_shift.index);
+
     std::span<u32> pixels = arena.push_array<u32>(static_cast<u64>(width) * height);
     const u8* src = content + header->offset;
     for (u32 y = 0; y < height; y++) {
@@ -80,11 +87,11 @@ LoadedBitmap load_bmp(
         std::memcpy(row, src + src_y * row_bytes, row_bytes);
         for (u32 x = 0; x < width; x++) {
             const u32 c = row[x];
-            const u8 r = static_cast<u8>(c >> red_shift.index);
-            const u8 g = static_cast<u8>(c >> green_shift.index);
-            const u8 b = static_cast<u8>(c >> blue_shift.index);
-            const u8 a = alpha_shift.found ? static_cast<u8>(c >> alpha_shift.index) : 0xFF;
-            row[x] = pack_color(r, g, b, a);
+            const u32 r = rotate_left(c & red_mask, red_rotate);
+            const u32 g = rotate_left(c & green_mask, green_rotate);
+            const u32 b = rotate_left(c & blue_mask, blue_rotate);
+            const u32 a = alpha_shift.found ? rotate_left(c & alpha_mask, alpha_rotate) : 0xFFu << k_alpha_shift;
+            row[x] = pack_shifted_color(r, g, b, a);
         }
     }
 
