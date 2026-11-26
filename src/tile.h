@@ -61,9 +61,7 @@ struct World {
 // far from anything allocated, which reads as off-world. tile_rel is always in
 // range (0 <= tile_rel < tile side); move with world_pos_offset() so it stays that way.
 struct WorldPosition {
-    u32 abs_tile_x;
-    u32 abs_tile_y;
-    u32 abs_tile_z;  // level; changes only through stairs
+    Vec3u abs_tile;  // z is the level; it changes only through stairs
     Vec2 tile_rel;
 };
 

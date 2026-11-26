@@ -45,29 +45,29 @@ TEST(world_pos_offset_carries_into_neighbor_tiles) {
     World* world = make_world();
     defer(std::free(world));
     const f32 side = world->tile_side_in_meters;
-    const WorldPosition start = {.abs_tile_x = 5, .abs_tile_y = 5, .abs_tile_z = 0, .tile_rel = {0.7f, 0.7f}};
+    const WorldPosition start = {.abs_tile = {.x = 5, .y = 5, .z = 0}, .tile_rel = {0.7f, 0.7f}};
 
     WorldPosition right = world_pos_offset(*world, start, {1.0f, 0.0f});
-    CHECK_EQ(right.abs_tile_x, 6);
+    CHECK_EQ(right.abs_tile.x, 6);
     CHECK_NEAR(right.tile_rel.x, 0.3f, 1e-5f);
-    CHECK_EQ(right.abs_tile_y, 5);  // the other axis is untouched
+    CHECK_EQ(right.abs_tile.y, 5);  // the other axis is untouched
     CHECK_EQ(right.tile_rel.y, start.tile_rel.y);
 
     WorldPosition left = world_pos_offset(*world, start, {-1.0f, 0.0f});
-    CHECK_EQ(left.abs_tile_x, 4);
+    CHECK_EQ(left.abs_tile.x, 4);
     CHECK_NEAR(left.tile_rel.x, 1.1f, 1e-5f);
 
     WorldPosition far_up = world_pos_offset(*world, start, {0.0f, 5.0f * side + 0.2f});
-    CHECK_EQ(far_up.abs_tile_y, 10);
+    CHECK_EQ(far_up.abs_tile.y, 10);
     CHECK_NEAR(far_up.tile_rel.y, 0.9f, 1e-5f);
 
     WorldPosition far_down = world_pos_offset(*world, start, {0.0f, -3.0f * side});
-    CHECK_EQ(far_down.abs_tile_y, 2);
+    CHECK_EQ(far_down.abs_tile.y, 2);
     CHECK_NEAR(far_down.tile_rel.y, 0.7f, 1e-5f);
 
     // Landing exactly on the boundary belongs to the next tile.
-    WorldPosition on_edge = world_pos_offset(*world, {.abs_tile_x = 5}, {side, 0.0f});
-    CHECK_EQ(on_edge.abs_tile_x, 6);
+    WorldPosition on_edge = world_pos_offset(*world, {.abs_tile = {.x = 5}}, {side, 0.0f});
+    CHECK_EQ(on_edge.abs_tile.x, 6);
     CHECK_EQ(on_edge.tile_rel.x, 0.0f);
 }
 
@@ -77,9 +77,9 @@ TEST(world_pos_offset_tiny_negative_stays_canonical) {
 
     // -1e-8 + 1.4 rounds to exactly 1.4f: the case recanonicalize_coord
     // corrects after the floor.
-    WorldPosition pos = world_pos_offset(*world, {.abs_tile_x = 5}, {-1e-8f, 0.0f});
+    WorldPosition pos = world_pos_offset(*world, {.abs_tile = {.x = 5}}, {-1e-8f, 0.0f});
     CHECK(is_canonical(*world, pos));
-    CHECK_EQ(pos.abs_tile_x, 5);
+    CHECK_EQ(pos.abs_tile.x, 5);
     CHECK_EQ(pos.tile_rel.x, 0.0f);
 }
 
@@ -90,7 +90,7 @@ TEST(world_pos_offset_left_of_zero_wraps_off_world) {
     set_tile_value(arena, *world, 0, 0, 0, k_tile_empty);
 
     WorldPosition pos = world_pos_offset(*world, {.tile_rel = {0.5f, 0.5f}}, {-1.0f, 0.0f});
-    CHECK_EQ(pos.abs_tile_x, 0xFFFFFFFF);
+    CHECK_EQ(pos.abs_tile.x, 0xFFFFFFFF);
     CHECK_NEAR(pos.tile_rel.x, 0.9f, 1e-5f);
     CHECK(!is_world_pos_walkable(*world, pos));
 }
@@ -127,8 +127,8 @@ TEST(world_pos_diff_is_signed) {
     defer(std::free(world));
     const f32 side = world->tile_side_in_meters;
 
-    const WorldPosition a = {.abs_tile_x = 7, .abs_tile_y = 3, .tile_rel = {0.2f, 0.5f}};
-    const WorldPosition b = {.abs_tile_x = 5, .abs_tile_y = 4, .tile_rel = {1.0f, 0.5f}};
+    const WorldPosition a = {.abs_tile = {.x = 7, .y = 3}, .tile_rel = {0.2f, 0.5f}};
+    const WorldPosition b = {.abs_tile = {.x = 5, .y = 4}, .tile_rel = {1.0f, 0.5f}};
 
     Vec2 ab = world_pos_diff(*world, a, b);
     CHECK_NEAR(ab.x, 2.0f * side - 0.8f, 1e-5f);
@@ -139,14 +139,14 @@ TEST(world_pos_diff_is_signed) {
     CHECK_NEAR(ba.y, -ab.y, 1e-5f);
 
     // Across the wrap: tile 0xFFFFFFFF is one tile left of tile 0.
-    const WorldPosition wrapped = {.abs_tile_x = 0xFFFFFFFF, .tile_rel = {0.5f, 0.0f}};
-    const WorldPosition one = {.abs_tile_x = 1, .tile_rel = {0.5f, 0.0f}};
+    const WorldPosition wrapped = {.abs_tile = {.x = 0xFFFFFFFF}, .tile_rel = {0.5f, 0.0f}};
+    const WorldPosition one = {.abs_tile = {.x = 1}, .tile_rel = {0.5f, 0.0f}};
     CHECK_NEAR(world_pos_diff(*world, wrapped, one).x, -2.0f * side, 1e-5f);
     CHECK_NEAR(world_pos_diff(*world, one, wrapped).x, 2.0f * side, 1e-5f);
 
     // z is ignored.
     WorldPosition other_level = a;
-    other_level.abs_tile_z = 9;
+    other_level.abs_tile.z = 9;
     CHECK_NEAR(world_pos_diff(*world, other_level, a).x, 0.0f, 0.0f);
 }
 
@@ -227,44 +227,44 @@ TEST(try_move_stops_at_first_wall) {
     const f32 mid = 0.5f * side;
 
     // Open floor: not blocked, the whole move is taken.
-    const WorldPosition center = {.abs_tile_x = 11, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {mid, mid}};
+    const WorldPosition center = {.abs_tile = {.x = 11, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
     MoveResult clear = try_move(*world, center, {0.3f, -0.2f});
     CHECK(!clear.blocked);
     CHECK_EQ(clear.t, 1.0f);
-    CHECK_EQ(clear.new_pos.abs_tile_x, 11);
+    CHECK_EQ(clear.new_pos.abs_tile.x, 11);
     CHECK_NEAR(clear.new_pos.tile_rel.x, mid + 0.3f, 1e-5f);
     CHECK_NEAR(clear.new_pos.tile_rel.y, mid - 0.2f, 1e-5f);
 
     // Into the right wall, 0.05 away with a 0.1 move: stops halfway, just
     // short of the wall, with the normal pointing back out of it.
     const WorldPosition by_right =
-        {.abs_tile_x = 12, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {side - 0.05f, mid}};
+        {.abs_tile = {.x = 12, .y = 11, .z = 0}, .tile_rel = {side - 0.05f, mid}};
     MoveResult right = try_move(*world, by_right, {0.1f, 0.0f});
     CHECK(right.blocked);
     CHECK_NEAR(right.t, 0.5f, 1e-3f);
-    CHECK_EQ(right.new_pos.abs_tile_x, 12);
+    CHECK_EQ(right.new_pos.abs_tile.x, 12);
     CHECK(right.new_pos.tile_rel.x < side);
     CHECK_NEAR(right.new_pos.tile_rel.x, side, 1e-4f);
     CHECK_EQ(right.wall_normal, (Vec2{-1.0f, 0.0f}));
 
     // Into the left wall: normal points right.
-    const WorldPosition by_left = {.abs_tile_x = 10, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {0.05f, mid}};
+    const WorldPosition by_left = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = {0.05f, mid}};
     MoveResult left = try_move(*world, by_left, {-0.1f, 0.0f});
     CHECK(left.blocked);
-    CHECK_EQ(left.new_pos.abs_tile_x, 10);
+    CHECK_EQ(left.new_pos.abs_tile.x, 10);
     CHECK_EQ(left.wall_normal, (Vec2{1.0f, 0.0f}));
 
     // Down into the bottom wall: normal points up (world y is up).
-    const WorldPosition by_bottom = {.abs_tile_x = 11, .abs_tile_y = 10, .abs_tile_z = 0, .tile_rel = {mid, 0.05f}};
+    const WorldPosition by_bottom = {.abs_tile = {.x = 11, .y = 10, .z = 0}, .tile_rel = {mid, 0.05f}};
     MoveResult bottom = try_move(*world, by_bottom, {0.0f, -0.1f});
     CHECK(bottom.blocked);
-    CHECK_EQ(bottom.new_pos.abs_tile_y, 10);
+    CHECK_EQ(bottom.new_pos.abs_tile.y, 10);
     CHECK_EQ(bottom.wall_normal, (Vec2{0.0f, 1.0f}));
 
     // Diagonally toward the top-right corner, nearer the right wall than the
     // top one but moving so the top face is crossed first (t 0.4 vs 0.5).
     const WorldPosition by_corner =
-        {.abs_tile_x = 12, .abs_tile_y = 12, .abs_tile_z = 0, .tile_rel = {side - 0.05f, side - 0.04f}};
+        {.abs_tile = {.x = 12, .y = 12, .z = 0}, .tile_rel = {side - 0.05f, side - 0.04f}};
     MoveResult corner = try_move(*world, by_corner, {0.1f, 0.1f});
     CHECK(corner.blocked);
     CHECK_NEAR(corner.t, 0.4f, 1e-3f);
@@ -282,11 +282,11 @@ TEST(try_move_does_not_tunnel_through_walls) {
     const f32 side = world->tile_side_in_meters;
     const f32 mid = 0.5f * side;
 
-    const WorldPosition start = {.abs_tile_x = 12, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {mid, mid}};
+    const WorldPosition start = {.abs_tile = {.x = 12, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
     MoveResult move = try_move(*world, start, {2.0f * side, 0.0f});
     CHECK(move.blocked);
     CHECK_NEAR(move.t, 0.25f, 1e-3f);
-    CHECK_EQ(move.new_pos.abs_tile_x, 12);
+    CHECK_EQ(move.new_pos.abs_tile.x, 12);
     CHECK_EQ(move.wall_normal, (Vec2{-1.0f, 0.0f}));
 }
 
@@ -299,7 +299,7 @@ TEST(try_move_only_blocks_moving_into_a_face) {
     const f32 mid = 0.5f * side;
 
     // Resting exactly on the left wall's face: stepping away is free...
-    const WorldPosition on_face = {.abs_tile_x = 10, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {0.0f, mid}};
+    const WorldPosition on_face = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = {0.0f, mid}};
     MoveResult away = try_move(*world, on_face, {0.1f, 0.0f});
     CHECK(!away.blocked);
     CHECK_NEAR(away.new_pos.tile_rel.x, 0.1f, 1e-5f);
@@ -308,21 +308,21 @@ TEST(try_move_only_blocks_moving_into_a_face) {
     MoveResult into = try_move(*world, on_face, {-0.1f, 0.0f});
     CHECK(into.blocked);
     CHECK_EQ(into.t, 0.0f);
-    CHECK_EQ(into.new_pos.abs_tile_x, 10);
+    CHECK_EQ(into.new_pos.abs_tile.x, 10);
     CHECK_EQ(into.new_pos.tile_rel.x, 0.0f);
 
     // Moving along a wall, parallel to its face, isn't blocked.
-    const WorldPosition by_wall = {.abs_tile_x = 10, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {0.01f, mid}};
+    const WorldPosition by_wall = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = {0.01f, mid}};
     MoveResult along = try_move(*world, by_wall, {0.0f, side});
     CHECK(!along.blocked);
-    CHECK_EQ(along.new_pos.abs_tile_y, 12);
+    CHECK_EQ(along.new_pos.abs_tile.y, 12);
 
     // Stuck inside a wall: the faces only block from outside, so it can
     // walk back out onto the floor.
-    const WorldPosition in_wall = {.abs_tile_x = 13, .abs_tile_y = 11, .abs_tile_z = 0, .tile_rel = {mid, mid}};
+    const WorldPosition in_wall = {.abs_tile = {.x = 13, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
     MoveResult out = try_move(*world, in_wall, {-side, 0.0f});
     CHECK(!out.blocked);
-    CHECK_EQ(out.new_pos.abs_tile_x, 12);
+    CHECK_EQ(out.new_pos.abs_tile.x, 12);
 }
 
 TEST(tile_values_and_walkability) {
@@ -361,7 +361,7 @@ TEST(tile_values_and_walkability) {
     CHECK(is_tile_walkable(*world, 20, 3, 0));
 
     // The WorldPosition overload reads the same tile.
-    const WorldPosition pos = {.abs_tile_x = 23, .abs_tile_y = 3, .abs_tile_z = 0, .tile_rel = {0.5f, 0.0f}};
+    const WorldPosition pos = {.abs_tile = {.x = 23, .y = 3, .z = 0}, .tile_rel = {0.5f, 0.0f}};
     CHECK(get_tile_value(*world, pos, value));
     CHECK_EQ(value, k_tile_stairs_up);
     CHECK(is_world_pos_walkable(*world, pos));

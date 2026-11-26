@@ -93,7 +93,7 @@ void set_tile_value(Arena& arena, World& world, u32 abs_tile_x, u32 abs_tile_y, 
 }
 
 bool get_tile_value(World& world, const WorldPosition& pos, u32& value) {
-    return get_tile_value(world, pos.abs_tile_x, pos.abs_tile_y, pos.abs_tile_z, value);
+    return get_tile_value(world, pos.abs_tile.x, pos.abs_tile.y, pos.abs_tile.z, value);
 }
 
 // Floor and stairs can be walked on; walls, unwritten tiles and missing
@@ -123,13 +123,13 @@ static void recanonicalize_coord(f32 tile_side, u32& tile, f32& tile_rel) {
 
 WorldPosition world_pos_offset(const World& world, WorldPosition pos, Vec2 delta) {
     pos.tile_rel += delta;
-    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile_x, pos.tile_rel.x);
-    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile_y, pos.tile_rel.y);
+    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile.x, pos.tile_rel.x);
+    recanonicalize_coord(world.tile_side_in_meters, pos.abs_tile.y, pos.tile_rel.y);
     return pos;
 }
 
 bool is_world_pos_walkable(World& world, const WorldPosition& pos) {
-    bool res = is_tile_walkable(world, pos.abs_tile_x, pos.abs_tile_y, pos.abs_tile_z);
+    bool res = is_tile_walkable(world, pos.abs_tile.x, pos.abs_tile.y, pos.abs_tile.z);
     return res;
 }
 
@@ -138,8 +138,8 @@ Vec2 world_pos_diff(const World& world, const WorldPosition& a, const WorldPosit
     // Subtracting as u32 and reinterpreting as i32 gives the signed distance
     // even across a wrap.
     const Vec2 d_tiles = {
-        .x = static_cast<f32>(static_cast<i32>(a.abs_tile_x - b.abs_tile_x)),
-        .y = static_cast<f32>(static_cast<i32>(a.abs_tile_y - b.abs_tile_y)),
+        .x = static_cast<f32>(static_cast<i32>(a.abs_tile.x - b.abs_tile.x)),
+        .y = static_cast<f32>(static_cast<i32>(a.abs_tile.y - b.abs_tile.y)),
     };
     return world.tile_side_in_meters * d_tiles + (a.tile_rel - b.tile_rel);
 }
@@ -186,11 +186,11 @@ static bool test_wall(
 // The entity is treated as a point: its width isn't taken into account yet.
 MoveResult try_move(World& world, const WorldPosition& from, Vec2 delta) {
     const WorldPosition to = world_pos_offset(world, from, delta);
-    const u32 min_tile_x = std::min(from.abs_tile_x, to.abs_tile_x);
-    const u32 min_tile_y = std::min(from.abs_tile_y, to.abs_tile_y);
-    const u32 one_past_max_tile_x = std::max(from.abs_tile_x, to.abs_tile_x) + 1;
-    const u32 one_past_max_tile_y = std::max(from.abs_tile_y, to.abs_tile_y) + 1;
-    const u32 abs_tile_z = from.abs_tile_z;
+    const u32 min_tile_x = std::min(from.abs_tile.x, to.abs_tile.x);
+    const u32 min_tile_y = std::min(from.abs_tile.y, to.abs_tile.y);
+    const u32 one_past_max_tile_x = std::max(from.abs_tile.x, to.abs_tile.x) + 1;
+    const u32 one_past_max_tile_y = std::max(from.abs_tile.y, to.abs_tile.y) + 1;
+    const u32 abs_tile_z = from.abs_tile.z;
     const f32 side = world.tile_side_in_meters;
     // Tile-relative corners; tile_rel 0 is the tile's bottom-left corner.
     const Vec2 min_corner = {};
@@ -204,9 +204,7 @@ MoveResult try_move(World& world, const WorldPosition& from, Vec2 delta) {
                 continue;
             }
             const WorldPosition tile_corner = {
-                .abs_tile_x = abs_tile_x,
-                .abs_tile_y = abs_tile_y,
-                .abs_tile_z = abs_tile_z,
+                .abs_tile = {.x = abs_tile_x, .y = abs_tile_y, .z = abs_tile_z},
                 .tile_rel = {},
             };
             const Vec2 rel = world_pos_diff(world, from, tile_corner);

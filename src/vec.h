@@ -1,135 +1,178 @@
 #pragma once
 #include "types.h"
 #include <cmath>
+#include <concepts>
+#include <type_traits>
 
 namespace hh {
 
-struct Vec2 {
-    f32 x;
-    f32 y;
+// Vectors are templated on their component type; the f32 ones keep the plain
+// names (Vec2, Vec3, Vec4) and the integer ones carry a suffix (Vec2u, Vec3i).
+//
+// Scalar parameters are std::type_identity_t<T> so they don't take part in
+// deduction: T comes from the vector alone, and `v * 2` on a Vec2 converts the
+// 2 instead of failing to deduce. Vectors of different component types don't
+// mix; convert explicitly.
+
+template <typename T>
+struct TVec2 {
+    T x;
+    T y;
+    constexpr bool operator==(const TVec2&) const = default;
 };
-inline constexpr Vec2 operator+(Vec2 a, Vec2 b) {
+template <typename T>
+inline constexpr TVec2<T> operator+(TVec2<T> a, TVec2<T> b) {
     return {
         .x = a.x + b.x,
         .y = a.y + b.y,
     };
 }
-inline constexpr Vec2 operator-(Vec2 a, Vec2 b) {
+template <typename T>
+inline constexpr TVec2<T> operator-(TVec2<T> a, TVec2<T> b) {
     return {
         .x = a.x - b.x,
         .y = a.y - b.y,
     };
 }
-inline constexpr Vec2 operator-(Vec2 a) {
+template <typename T>
+    requires std::is_signed_v<T>
+inline constexpr TVec2<T> operator-(TVec2<T> a) {
     return {
         .x = -a.x,
         .y = -a.y,
     };
 }
-inline constexpr Vec2 operator*(Vec2 v, f32 f) {
+template <typename T>
+inline constexpr TVec2<T> operator*(TVec2<T> v, std::type_identity_t<T> f) {
     return {
         .x = v.x * f,
         .y = v.y * f,
     };
 }
-inline constexpr Vec2 operator*(f32 f, Vec2 v) {
+template <typename T>
+inline constexpr TVec2<T> operator*(std::type_identity_t<T> f, TVec2<T> v) {
     return v * f;
 }
-inline constexpr Vec2& operator*=(Vec2& a, f32 f) {
+template <typename T>
+inline constexpr TVec2<T>& operator*=(TVec2<T>& a, std::type_identity_t<T> f) {
     return a = a * f;
 }
-inline constexpr Vec2& operator+=(Vec2& a, Vec2 b) {
+template <typename T>
+inline constexpr TVec2<T>& operator+=(TVec2<T>& a, TVec2<T> b) {
     return a = a + b;
 }
-inline constexpr Vec2& operator-=(Vec2& a, Vec2 b) {
+template <typename T>
+inline constexpr TVec2<T>& operator-=(TVec2<T>& a, TVec2<T> b) {
     return a = a - b;
 }
-inline constexpr f32 dot(Vec2 a, Vec2 b) {
+template <typename T>
+inline constexpr T dot(TVec2<T> a, TVec2<T> b) {
     return a.x * b.x + a.y * b.y;
 }
 // Component-wise product, e.g. scaling each axis by a different amount.
-inline constexpr Vec2 hadamard(Vec2 a, Vec2 b) {
+template <typename T>
+inline constexpr TVec2<T> hadamard(TVec2<T> a, TVec2<T> b) {
     return {
         .x = a.x * b.x,
         .y = a.y * b.y,
     };
 }
-inline constexpr f32 length_sq(Vec2 v) {
+template <typename T>
+inline constexpr T length_sq(TVec2<T> v) {
     return dot(v, v);
 }
-inline f32 length(Vec2 v) {
-    return sqrtf(length_sq(v));
+template <std::floating_point T>
+inline T length(TVec2<T> v) {
+    return std::sqrt(length_sq(v));
 }
 
-struct Vec3 {
-    f32 x;
-    f32 y;
-    f32 z;
+template <typename T>
+struct TVec3 {
+    T x;
+    T y;
+    T z;
+    constexpr bool operator==(const TVec3&) const = default;
 };
-inline constexpr Vec3 operator+(Vec3 a, Vec3 b) {
+template <typename T>
+inline constexpr TVec3<T> operator+(TVec3<T> a, TVec3<T> b) {
     return {
         .x = a.x + b.x,
         .y = a.y + b.y,
         .z = a.z + b.z,
     };
 }
-inline constexpr Vec3 operator-(Vec3 a, Vec3 b) {
+template <typename T>
+inline constexpr TVec3<T> operator-(TVec3<T> a, TVec3<T> b) {
     return {
         .x = a.x - b.x,
         .y = a.y - b.y,
         .z = a.z - b.z,
     };
 }
-inline constexpr Vec3 operator-(Vec3 a) {
+template <typename T>
+    requires std::is_signed_v<T>
+inline constexpr TVec3<T> operator-(TVec3<T> a) {
     return {
         .x = -a.x,
         .y = -a.y,
         .z = -a.z,
     };
 }
-inline constexpr Vec3 operator*(Vec3 v, f32 f) {
+template <typename T>
+inline constexpr TVec3<T> operator*(TVec3<T> v, std::type_identity_t<T> f) {
     return {
         .x = v.x * f,
         .y = v.y * f,
         .z = v.z * f,
     };
 }
-inline constexpr Vec3 operator*(f32 f, Vec3 v) {
+template <typename T>
+inline constexpr TVec3<T> operator*(std::type_identity_t<T> f, TVec3<T> v) {
     return v * f;
 }
-inline constexpr Vec3& operator*=(Vec3& a, f32 f) {
+template <typename T>
+inline constexpr TVec3<T>& operator*=(TVec3<T>& a, std::type_identity_t<T> f) {
     return a = a * f;
 }
-inline constexpr Vec3& operator+=(Vec3& a, Vec3 b) {
+template <typename T>
+inline constexpr TVec3<T>& operator+=(TVec3<T>& a, TVec3<T> b) {
     return a = a + b;
 }
-inline constexpr Vec3& operator-=(Vec3& a, Vec3 b) {
+template <typename T>
+inline constexpr TVec3<T>& operator-=(TVec3<T>& a, TVec3<T> b) {
     return a = a - b;
 }
-inline constexpr f32 dot(Vec3 a, Vec3 b) {
+template <typename T>
+inline constexpr T dot(TVec3<T> a, TVec3<T> b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
-inline constexpr Vec3 hadamard(Vec3 a, Vec3 b) {
+template <typename T>
+inline constexpr TVec3<T> hadamard(TVec3<T> a, TVec3<T> b) {
     return {
         .x = a.x * b.x,
         .y = a.y * b.y,
         .z = a.z * b.z,
     };
 }
-inline constexpr f32 length_sq(Vec3 v) {
+template <typename T>
+inline constexpr T length_sq(TVec3<T> v) {
     return dot(v, v);
 }
-inline f32 length(Vec3 v) {
-    return sqrtf(length_sq(v));
+template <std::floating_point T>
+inline T length(TVec3<T> v) {
+    return std::sqrt(length_sq(v));
 }
 
-struct Vec4 {
-    f32 x;
-    f32 y;
-    f32 z;
-    f32 w;
+template <typename T>
+struct TVec4 {
+    T x;
+    T y;
+    T z;
+    T w;
+    constexpr bool operator==(const TVec4&) const = default;
 };
-inline constexpr Vec4 operator+(Vec4 a, Vec4 b) {
+template <typename T>
+inline constexpr TVec4<T> operator+(TVec4<T> a, TVec4<T> b) {
     return {
         .x = a.x + b.x,
         .y = a.y + b.y,
@@ -137,7 +180,8 @@ inline constexpr Vec4 operator+(Vec4 a, Vec4 b) {
         .w = a.w + b.w,
     };
 }
-inline constexpr Vec4 operator-(Vec4 a, Vec4 b) {
+template <typename T>
+inline constexpr TVec4<T> operator-(TVec4<T> a, TVec4<T> b) {
     return {
         .x = a.x - b.x,
         .y = a.y - b.y,
@@ -145,7 +189,9 @@ inline constexpr Vec4 operator-(Vec4 a, Vec4 b) {
         .w = a.w - b.w,
     };
 }
-inline constexpr Vec4 operator-(Vec4 a) {
+template <typename T>
+    requires std::is_signed_v<T>
+inline constexpr TVec4<T> operator-(TVec4<T> a) {
     return {
         .x = -a.x,
         .y = -a.y,
@@ -153,7 +199,8 @@ inline constexpr Vec4 operator-(Vec4 a) {
         .w = -a.w,
     };
 }
-inline constexpr Vec4 operator*(Vec4 v, f32 f) {
+template <typename T>
+inline constexpr TVec4<T> operator*(TVec4<T> v, std::type_identity_t<T> f) {
     return {
         .x = v.x * f,
         .y = v.y * f,
@@ -161,22 +208,28 @@ inline constexpr Vec4 operator*(Vec4 v, f32 f) {
         .w = v.w * f,
     };
 }
-inline constexpr Vec4 operator*(f32 f, Vec4 v) {
+template <typename T>
+inline constexpr TVec4<T> operator*(std::type_identity_t<T> f, TVec4<T> v) {
     return v * f;
 }
-inline constexpr Vec4& operator*=(Vec4& a, f32 f) {
+template <typename T>
+inline constexpr TVec4<T>& operator*=(TVec4<T>& a, std::type_identity_t<T> f) {
     return a = a * f;
 }
-inline constexpr Vec4& operator+=(Vec4& a, Vec4 b) {
+template <typename T>
+inline constexpr TVec4<T>& operator+=(TVec4<T>& a, TVec4<T> b) {
     return a = a + b;
 }
-inline constexpr Vec4& operator-=(Vec4& a, Vec4 b) {
+template <typename T>
+inline constexpr TVec4<T>& operator-=(TVec4<T>& a, TVec4<T> b) {
     return a = a - b;
 }
-inline constexpr f32 dot(Vec4 a, Vec4 b) {
+template <typename T>
+inline constexpr T dot(TVec4<T> a, TVec4<T> b) {
     return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
 }
-inline constexpr Vec4 hadamard(Vec4 a, Vec4 b) {
+template <typename T>
+inline constexpr TVec4<T> hadamard(TVec4<T> a, TVec4<T> b) {
     return {
         .x = a.x * b.x,
         .y = a.y * b.y,
@@ -184,12 +237,24 @@ inline constexpr Vec4 hadamard(Vec4 a, Vec4 b) {
         .w = a.w * b.w,
     };
 }
-inline constexpr f32 length_sq(Vec4 v) {
+template <typename T>
+inline constexpr T length_sq(TVec4<T> v) {
     return dot(v, v);
 }
-inline f32 length(Vec4 v) {
-    return sqrtf(length_sq(v));
+template <std::floating_point T>
+inline T length(TVec4<T> v) {
+    return std::sqrt(length_sq(v));
 }
+
+using Vec2 = TVec2<f32>;
+using Vec3 = TVec3<f32>;
+using Vec4 = TVec4<f32>;
+using Vec2i = TVec2<i32>;
+using Vec3i = TVec3<i32>;
+using Vec4i = TVec4<i32>;
+using Vec2u = TVec2<u32>;
+using Vec3u = TVec3<u32>;
+using Vec4u = TVec4<u32>;
 
 inline constexpr f32 square(f32 v) {
     return v * v;

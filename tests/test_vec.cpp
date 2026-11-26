@@ -149,6 +149,19 @@ static_assert([] {
 
 static_assert(sizeof(Vec3) == 12 && sizeof(Vec4) == 16);
 
+// Integer vectors: same operations, exact results, unsigned wraps.
+static_assert(Vec3u{1, 2, 3} + Vec3u{4, 5, 6} == Vec3u{5, 7, 9});
+static_assert(Vec3u{1, 2, 3} != Vec3u{1, 2, 4});
+static_assert(Vec2u{0, 5} - Vec2u{1, 2} == Vec2u{0xFFFFFFFF, 3});
+static_assert(-Vec2i{1, -2} == Vec2i{-1, 2});
+static_assert(Vec3i{1, 2, 3} * 2 == 2 * Vec3i{1, 2, 3});
+static_assert(dot(Vec2i{1, 2}, Vec2i{3, 4}) == 11);
+static_assert(sizeof(Vec3u) == 12);
+// Negating an unsigned vector would only wrap, so it isn't offered.
+template <typename V>
+concept Negatable = requires(V v) { -v; };
+static_assert(Negatable<Vec2i> && !Negatable<Vec2u>);
+
 // length uses sqrtf, which isn't constexpr, so it's checked at runtime.
 TEST(vec_length) {
     CHECK_NEAR(length(Vec2{3, 4}), 5.0f, 1e-6f);

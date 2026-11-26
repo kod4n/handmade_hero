@@ -11,12 +11,10 @@ namespace hh {
 
 // Center of the room (one screen of tiles) that pos is in.
 static WorldPosition room_center(World& world, const WorldPosition& pos) {
-    const u32 room_x = pos.abs_tile_x / k_screen_tile_cols;
-    const u32 room_y = pos.abs_tile_y / k_screen_tile_rows;
+    const u32 room_x = pos.abs_tile.x / k_screen_tile_cols;
+    const u32 room_y = pos.abs_tile.y / k_screen_tile_rows;
     const WorldPosition room_corner = {
-        .abs_tile_x = room_x * k_screen_tile_cols,
-        .abs_tile_y = room_y * k_screen_tile_rows,
-        .abs_tile_z = pos.abs_tile_z,
+        .abs_tile = {.x = room_x * k_screen_tile_cols, .y = room_y * k_screen_tile_rows, .z = pos.abs_tile.z},
         .tile_rel = {},
     };
     const Vec2 half_room_in_tiles = {
@@ -47,7 +45,7 @@ static u32 add_entity(GameState& state) {
 
 // Where new players appear: the middle of tile (1, 3) in the first room.
 static WorldPosition player_spawn_pos(const World& world) {
-    const WorldPosition tile = {.abs_tile_x = 8, .abs_tile_y = 4, .abs_tile_z = 0, .tile_rel = {}};
+    const WorldPosition tile = {.abs_tile = {.x = 8, .y = 4, .z = 0}, .tile_rel = {}};
     return world_pos_offset(world, tile, 0.5f * Vec2{world.tile_side_in_meters, world.tile_side_in_meters});
 }
 
@@ -148,13 +146,13 @@ static void move_player(World& world, Entity& entity, f32 dt, Vec2 input_dir, f3
     // Stairs trigger only when stepping onto them. Arriving on the other
     // level puts the entity on the matching stairs, which doesn't count as
     // a step, so it can't bounce straight back.
-    bool changed_tile = new_pos.abs_tile_x != old_pos.abs_tile_x || new_pos.abs_tile_y != old_pos.abs_tile_y;
+    bool changed_tile = new_pos.abs_tile.x != old_pos.abs_tile.x || new_pos.abs_tile.y != old_pos.abs_tile.y;
     u32 value = 0;
     if (changed_tile && get_tile_value(world, new_pos, value)) {
         if (value == k_tile_stairs_up) {
-            entity.pos.abs_tile_z++;
+            entity.pos.abs_tile.z++;
         } else if (value == k_tile_stairs_down) {
-            entity.pos.abs_tile_z--;
+            entity.pos.abs_tile.z--;
         }
     }
 }
@@ -381,7 +379,7 @@ extern "C" void game_render(
         Vec2 step = t * world_pos_diff(world, target, state->camera_pos);
         state->camera_pos = world_pos_offset(world, state->camera_pos, step);
         // Levels don't ease; the view switches with the player.
-        state->camera_pos.abs_tile_z = followed->pos.abs_tile_z;
+        state->camera_pos.abs_tile.z = followed->pos.abs_tile.z;
     }
 
     // clear
@@ -412,8 +410,8 @@ extern "C" void game_render(
     for (i32 rel_row = -half_rows; rel_row <= half_rows; rel_row++) {
         for (i32 rel_col = -half_cols; rel_col <= half_cols; rel_col++) {
             // Going below tile 0 wraps to a chunk that doesn't exist.
-            const u32 tile_x = camera.abs_tile_x + static_cast<u32>(rel_col);
-            const u32 tile_y = camera.abs_tile_y + static_cast<u32>(rel_row);
+            const u32 tile_x = camera.abs_tile.x + static_cast<u32>(rel_col);
+            const u32 tile_y = camera.abs_tile.y + static_cast<u32>(rel_row);
 
             // Debug colors: dark blue where no chunk exists, dark red for
             // tiles in an allocated chunk that nothing wrote.
@@ -422,13 +420,13 @@ extern "C" void game_render(
             bool is_player_tile = false;
             for (u32 i = first_entity; i < entity_end; i++) {
                 const Entity& e = state->entities[i];
-                if (e.exists && e.pos.abs_tile_x == tile_x && e.pos.abs_tile_y == tile_y
-                    && e.pos.abs_tile_z == camera.abs_tile_z) {
+                if (e.exists && e.pos.abs_tile.x == tile_x && e.pos.abs_tile.y == tile_y
+                    && e.pos.abs_tile.z == camera.abs_tile.z) {
                     is_player_tile = true;
                     break;
                 }
             }
-            if (get_tile_value(world, tile_x, tile_y, camera.abs_tile_z, value)) {
+            if (get_tile_value(world, tile_x, tile_y, camera.abs_tile.z, value)) {
                 if (value == k_tile_empty && has_background && !is_player_tile) {
                     continue;
                 }
@@ -477,7 +475,7 @@ extern "C" void game_render(
     // Players on a different level from the camera aren't drawn.
     for (u32 entity_index = first_entity; entity_index < entity_end; entity_index++) {
         const Entity& entity = state->entities[entity_index];
-        if (!entity.exists || entity.pos.abs_tile_z != camera.abs_tile_z) {
+        if (!entity.exists || entity.pos.abs_tile.z != camera.abs_tile.z) {
             continue;
         }
 
