@@ -2,6 +2,7 @@
 #include "arena.h"
 #include "tile.h"
 #include "vec.h"
+#include "game.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -179,22 +180,28 @@ static bool test_wall(
     return hit;
 }
 
-// Moves a point by delta from `from`, stopping at the first unwalkable tile
-// along the way. Every tile in the rectangle spanned by the start and end tiles is checked,
-// and the four faces of each unwalkable one are intersected with the path, so a fast
-// move can't skip over a wall the way checking only the end point did.
-// The entity is treated as a point: its width isn't taken into account yet.
-MoveResult try_move(World& world, const WorldPosition& from, Vec2 delta) {
+// Moves the entity by delta from `from`, stopping at the first unwalkable tile
+// along the way. The entity is its collision_dim box centered on `from`. Each wall
+// is grown by that box (their Minkowski sum), so the box hits a wall exactly when its
+// center point hits the grown wall, and only that point's path has to be traced.
+// Every tile in the rectangle spanned by the start and end tiles, widened by the
+// box's half size, is checked, and the four faces of each unwalkable one's grown box
+// are intersected with the path, so a fast move can't skip over a wall.
+MoveResult try_move(World& world, const Entity& entity, const WorldPosition& from, Vec2 delta) {
     const WorldPosition to = world_pos_offset(world, from, delta);
-    const u32 min_tile_x = std::min(from.abs_tile.x, to.abs_tile.x);
-    const u32 min_tile_y = std::min(from.abs_tile.y, to.abs_tile.y);
-    const u32 one_past_max_tile_x = std::max(from.abs_tile.x, to.abs_tile.x) + 1;
-    const u32 one_past_max_tile_y = std::max(from.abs_tile.y, to.abs_tile.y) + 1;
-    const u32 abs_tile_z = from.abs_tile.z;
     const f32 side = world.tile_side_in_meters;
-    // Tile-relative corners; tile_rel 0 is the tile's bottom-left corner.
-    const Vec2 min_corner = {};
-    const Vec2 max_corner = {.x = side, .y = side};
+    const Vec2 half_size = 0.5f * entity.collision_dim;
+    const u32 pad_x = static_cast<u32>(ceilf(half_size.x / side));
+    const u32 pad_y = static_cast<u32>(ceilf(half_size.y / side));
+    const u32 min_tile_x = std::min(from.abs_tile.x, to.abs_tile.x) - pad_x;
+    const u32 min_tile_y = std::min(from.abs_tile.y, to.abs_tile.y) - pad_y;
+    const u32 one_past_max_tile_x = std::max(from.abs_tile.x, to.abs_tile.x) + 1 + pad_x;
+    const u32 one_past_max_tile_y = std::max(from.abs_tile.y, to.abs_tile.y) + 1 + pad_y;
+    const u32 abs_tile_z = from.abs_tile.z;
+    // Corners of the grown wall, relative to the wall tile's bottom-left
+    // corner (tile_rel 0): the tile pushed out by half the box on every side.
+    const Vec2 min_corner = -half_size;
+    const Vec2 max_corner = Vec2{side, side} + half_size;
 
     MoveResult res = {.t = 1.0f};
     // != rather than <, so the loops still end if the range wraps past u32 0.

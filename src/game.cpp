@@ -1,5 +1,6 @@
 #include "game.h"
 #include <cmath>
+#include "platform.h"
 #include "render.h"
 #include "vec.h"
 #include "random.h"
@@ -49,6 +50,14 @@ static WorldPosition player_spawn_pos(const World& world) {
     return world_pos_offset(world, tile, 0.5f * Vec2{world.tile_side_in_meters, world.tile_side_in_meters});
 }
 
+// Hero sprite layout, in bitmap pixels (see make_hero in tools/make_bitmaps.py):
+// a 48x60 body whose feet touch (24, 60), over a 32x8 shadow ellipse centered
+// on the feet. Bitmaps are drawn 1:1, so a bitmap pixel is a screen pixel.
+inline constexpr Vec2 k_hero_feet_px = {24.0f, 60.0f};
+inline constexpr Vec2 k_hero_body_px = {48.0f, 60.0f};
+inline constexpr Vec2 k_hero_shadow_px = {32.0f, 8.0f};
+inline constexpr f32 k_meters_per_pixel = k_tile_side_in_meters / k_tile_side_in_pixels;
+
 static void init_player(GameState& state, u32 index) {
     Entity* entity = get_entity(state, index);
     if (!entity) {
@@ -57,8 +66,11 @@ static void init_player(GameState& state, u32 index) {
     entity->exists = true;
     entity->pos = player_spawn_pos(state.world);
     entity->facing = Facing::Front;
-    entity->height = 1.4f;
-    entity->width = 0.75f * entity->height;
+    // Sized from the sprite: the body is 1.12 x 1.4 m, and the footprint is
+    // its shadow, so walls stop the hero where the shadow meets them.
+    entity->width = k_meters_per_pixel * k_hero_body_px.x;
+    entity->height = k_meters_per_pixel * k_hero_body_px.y;
+    entity->collision_dim = k_meters_per_pixel * k_hero_shadow_px;
 
     // The first player to join gets the camera.
     if (!get_entity(state, state.camera_entity_index)) {
@@ -111,10 +123,10 @@ static void move_player(World& world, Entity& entity, f32 dt, Vec2 input_dir, f3
     Vec2 new_vel = entity.vel + dt * accel;
 
     // Search in t: travel as much of the move as fits before the first
-    // wall. The entity collides as a point (its bottom-center), so it can
-    // still overlap walls by up to half its width.
+    // wall. The entity collides as its collision_dim footprint, centered on
+    // its position (its feet).
     const WorldPosition old_pos = entity.pos;
-    MoveResult move = try_move(world, old_pos, delta);
+    MoveResult move = try_move(world, entity, old_pos, delta);
     if (move.blocked) {
         // Glide: drop the into-wall part of the velocity and of the rest
         // of this frame's move, keeping only the part along the wall,
@@ -130,7 +142,7 @@ static void move_player(World& world, Entity& entity, f32 dt, Vec2 input_dir, f3
         new_vel = glide * (new_vel - dot(new_vel, n) * n);
         Vec2 rest = (1.0f - move.t) * delta;
         rest = glide * (rest - dot(rest, n) * n);
-        move = try_move(world, move.new_pos, rest);
+        move = try_move(world, entity, move.new_pos, rest);
         if (move.blocked) {
             // A second wall (e.g. a corner): stop moving into it too.
             // Normals are axis-aligned, so this keeps the first removal.
@@ -483,15 +495,23 @@ extern "C" void game_render(
         const Vec2 ground_pos = screen_center + hadamard(world_to_screen, from_camera);
         const LoadedBitmap& hero = state->hero[static_cast<u32>(entity.facing)];
         if (hero.pixels) {
-            // Every hero bitmap's feet touch (24, 60); the rows below hold its shadow.
-            constexpr Vec2 hero_align = {24.0f, 60.0f};
-            draw_bitmap(buffer, hero, ground_pos - hero_align);
-            continue;
+            // pos is the feet, which are also the shadow's (and footprint's) center.
+            draw_bitmap(buffer, hero, ground_pos - k_hero_feet_px);
+        } else {
+            const Vec2 dim = {.x = entity.width, .y = entity.height};
+            const Vec2 origin = ground_pos - m2p * Vec2{0.5f * entity.width, entity.height};
+            constexpr Color player_color = {.r = 1.0f, .g = 1.0f, .b = 0.0f};
+            render_rect(buffer, origin, origin + m2p * dim, player_color);
         }
-        const Vec2 dim = {.x = entity.width, .y = entity.height};
-        const Vec2 origin = ground_pos - m2p * Vec2{0.5f * entity.width, entity.height};
-        constexpr Color player_color = {.r = 1.0f, .g = 1.0f, .b = 0.0f};
-        render_rect(buffer, origin, origin + m2p * dim, player_color);
+
+        // Debug: the footprint try_move collides with, centered on pos. Drawn
+        // on top so it stays visible; it's symmetric, so the y flip doesn't
+        // change which corner is min.
+        if (k_dev_mode) {
+            Vec2 half_collision = 0.5f * m2p * entity.collision_dim;
+            constexpr Color collision_color = {.r = 1.0f, .g = 0.0f, .b = 1.0f};
+            render_rect(buffer, ground_pos - half_collision, ground_pos + half_collision, collision_color);
+        }
     }
 }
 
