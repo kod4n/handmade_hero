@@ -78,20 +78,18 @@ static void make_entity_low(GameState& state, u32 low_index) {
     low.high_index = 0;
 }
 
-// A wall filling tile (abs_tile_x, abs_tile_y, abs_tile_z): centered on it,
-// exactly its size, and colliding, so it blocks the same as a wall tile.
-static void add_wall(GameState& state, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
-    const u32 index = add_entity(state);
-    const Entity entity = get_entity(state, index);
-    // Out of low slots: raise k_max_entities. Without asserts the wall is
-    // skipped, leaving a gap.
+// An entity of `type` filling tile (abs_tile_x, abs_tile_y, abs_tile_z):
+// centered on it and exactly its size. Returns it, or an empty handle if
+// out of low slots, which asserts (raise k_max_entities).
+static Entity add_tile_entity(GameState& state, EntityType type, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
+    const Entity entity = get_entity(state, add_entity(state));
     assert(entity.low);
     if (!entity.low) {
-        return;
+        return entity;
     }
     const f32 side = state.world.tile_side_in_meters;
     LowEntity& low = *entity.low;
-    low.type = EntityType::Wall;
+    low.type = type;
     low.pos = {
         .abs_tile = {.x = abs_tile_x, .y = abs_tile_y, .z = abs_tile_z},
         .tile_rel = {0.5f * side, 0.5f * side},
@@ -99,7 +97,48 @@ static void add_wall(GameState& state, u32 abs_tile_x, u32 abs_tile_y, u32 abs_t
     low.width = side;
     low.height = side;
     low.collision_dim = {side, side};
-    low.collides = true;
+    return entity;
+}
+
+// A wall filling its tile, colliding, so it blocks the same as a wall tile.
+static void add_wall(GameState& state, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
+    if (const Entity wall = add_tile_entity(state, EntityType::Wall, abs_tile_x, abs_tile_y, abs_tile_z); wall.low) {
+        wall.low->collides = true;
+    }
+}
+
+// Stairs filling their tile. They don't collide: they're walked onto, and
+// stairs_level_change notices.
+static void add_stairs(GameState& state, bool up, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
+    add_tile_entity(state, up ? EntityType::StairsUp : EntityType::StairsDown, abs_tile_x, abs_tile_y, abs_tile_z);
+}
+
+// Whether p is in the dim-sized box centered on `center`. Half-open, like a
+// tile, so a point on the edge between two boxes is in exactly one.
+static bool in_box(const World& world, const WorldPosition& p, const WorldPosition& center, Vec2 dim) {
+    const Vec2 rel = world_pos_diff(world, p, center);
+    const Vec2 half = 0.5f * dim;
+    return -half.x <= rel.x && rel.x < half.x && -half.y <= rel.y && rel.y < half.y;
+}
+
+// How many levels a mover going from old_pos to new_pos (same level) climbs
+// by stairs: +1 or -1 if its center stepped onto high stairs this move, else
+// 0. Only stepping on counts, not being on them: arriving on the other level
+// puts the mover on the matching stairs, and that mustn't send it straight
+// back.
+static i32 stairs_level_change(GameState& state, const WorldPosition& old_pos, const WorldPosition& new_pos) {
+    for (u32 high_index = 1; high_index < state.high_entity_count; high_index++) {
+        const LowEntity& stairs = state.low_entities[state.high_entities[high_index].low_index];
+        if ((stairs.type != EntityType::StairsUp && stairs.type != EntityType::StairsDown)
+            || stairs.pos.abs_tile.z != new_pos.abs_tile.z) {
+            continue;
+        }
+        if (in_box(state.world, new_pos, stairs.pos, stairs.collision_dim)
+            && !in_box(state.world, old_pos, stairs.pos, stairs.collision_dim)) {
+            return stairs.type == EntityType::StairsUp ? 1 : -1;
+        }
+    }
+    return 0;
 }
 
 // The wall is the line x = wall_x, running from min_y to max_y;

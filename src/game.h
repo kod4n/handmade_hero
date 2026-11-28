@@ -29,6 +29,8 @@ enum class EntityType : u32 {
     None,
     Hero,
     Wall,
+    StairsUp,    // stepping onto it moves a hero up a level; doesn't collide
+    StairsDown,  // same, down a level
 };
 
 struct LowEntity {

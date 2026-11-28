@@ -194,20 +194,11 @@ static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir,
     entity.low->pos = new_pos;
     entity.high->pos = world_pos_diff(state.world, new_pos, state.camera_pos);
 
-    // Stairs trigger only when stepping onto them. Arriving on the other
-    // level puts the entity on the matching stairs, which doesn't count as
-    // a step, so it can't bounce straight back.
-    bool changed_tile = new_pos.abs_tile.x != old_pos.abs_tile.x || new_pos.abs_tile.y != old_pos.abs_tile.y;
-    u32 value = 0;
-    if (changed_tile && get_tile_value(state.world, new_pos, value)) {
-        // No demote here: set_camera demotes it if the camera doesn't follow
-        // it to the new level.
-        if (value == k_tile_stairs_up) {
-            entity.low->pos.abs_tile.z++;
-        } else if (value == k_tile_stairs_down) {
-            entity.low->pos.abs_tile.z--;
-        }
-    }
+    // Stairs (entities) trigger only when stepping onto them; see
+    // stairs_level_change. No demote here: set_camera demotes it if the
+    // camera doesn't follow it to the new level.
+    const i32 dz = stairs_level_change(state, old_pos, new_pos);
+    entity.low->pos.abs_tile.z += static_cast<u32>(dz);
 }
 
 extern "C" void game_sound(AudioBuffer& audio, AudioState& state) {
@@ -486,6 +477,10 @@ extern "C" void game_render(
             render_rect(buffer, ground_pos - half_dim, ground_pos + half_dim, gray_value(1.0f));
             break;
         }
+        case EntityType::StairsUp:
+        case EntityType::StairsDown:
+            // Still drawn by the tile loop. Drawing them here would put them
+            // over any hero earlier in the high list; that needs a draw order.
         case EntityType::None:
             break;
         }
@@ -494,7 +489,7 @@ extern "C" void game_render(
         // on top so it stays visible; it's symmetric, so the y flip doesn't
         // change which corner is min. Not for walls: their fill already is
         // their footprint, which this would cover completely.
-        if (k_dev_mode && entity.type != EntityType::Wall) {
+        if (k_dev_mode && entity.type == EntityType::Hero) {
             Vec2 half_collision = 0.5f * m2p * entity.collision_dim;
             constexpr Color collision_color = {.r = 1.0f, .g = 0.0f, .b = 1.0f};
             render_rect(buffer, ground_pos - half_collision, ground_pos + half_collision, collision_color);
@@ -518,9 +513,9 @@ extern "C" void game_render(
 // platform. Chunks are created as the screens write into them; tiles in a
 // new chunk start out as wall.
 //
-// Walls block as entities: each wall tile also gets a wall entity (add_wall)
-// of the same shape, and only entities collide. The wall tiles are still
-// written for drawing, and the tile map still holds the stairs. Outside the
+// Walls and stairs are entities: each wall or stairs tile also gets an entity
+// of the same shape (add_wall, add_stairs), and only entities collide or
+// change levels. The tiles are still written, but only for drawing. Outside the
 // screens there are no entities, so nothing there blocks; that's fine because
 // every screen is walled in, with doors only between screens on the path.
 static void generate_world(GameState& state) {
@@ -586,6 +581,8 @@ static void generate_world(GameState& state) {
                 set_tile_value(arena, world, abs_tile_x, abs_tile_y, screen_z, value);
                 if (value == k_tile_wall) {
                     add_wall(state, abs_tile_x, abs_tile_y, screen_z);
+                } else if (value == k_tile_stairs_up || value == k_tile_stairs_down) {
+                    add_stairs(state, value == k_tile_stairs_up, abs_tile_x, abs_tile_y, screen_z);
                 }
             }
         }

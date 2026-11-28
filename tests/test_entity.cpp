@@ -325,3 +325,46 @@ TEST(add_wall_blocks_like_a_wall_tile) {
     CHECK_NEAR(move.new_pos.tile_rel.x, side, 1e-3f);
     CHECK_EQ(move.wall_normal, (Vec2{-1.0f, 0.0f}));
 }
+
+// Stairs fill their tile without colliding, and change levels only when a
+// mover's center steps onto them, not while it's already on them.
+TEST(stairs_trigger_on_stepping_onto_them) {
+    GameState* state = make_state();
+    defer(std::free(state));
+    const f32 side = state->world.tile_side_in_meters;
+    const f32 mid = 0.5f * side;
+
+    add_stairs(*state, true, 11, 11, 0);
+    const Entity up = get_entity(*state, state->low_entity_count - 1);
+    make_entity_high(*state, up.low_index);
+    add_stairs(*state, false, 13, 11, 0);
+    make_entity_high(*state, state->low_entity_count - 1);
+    CHECK(up.low->type == EntityType::StairsUp);
+    CHECK(!up.low->collides);
+
+    auto at = [&](u32 tile_x, f32 rel_x) {
+        return WorldPosition{.abs_tile = {.x = tile_x, .y = 11, .z = 0}, .tile_rel = {rel_x, mid}};
+    };
+    // Onto them from the left: up a level. Onto the down stairs: down.
+    CHECK_EQ(stairs_level_change(*state, at(10, mid), at(11, 0.1f)), 1);
+    CHECK_EQ(stairs_level_change(*state, at(12, mid), at(13, 0.1f)), -1);
+    // Moving around on them, or off them: nothing.
+    CHECK_EQ(stairs_level_change(*state, at(11, 0.1f), at(11, side - 0.1f)), 0);
+    CHECK_EQ(stairs_level_change(*state, at(11, mid), at(12, mid)), 0);
+    // Not reaching them: the tile's left edge is still outside.
+    CHECK_EQ(stairs_level_change(*state, at(10, 0.1f), at(10, side - 0.01f)), 0);
+
+    // Stairs on another level don't count, nor do ones that aren't high.
+    WorldPosition upstairs_from = at(10, mid);
+    WorldPosition upstairs_to = at(11, 0.1f);
+    upstairs_from.abs_tile.z = 1;
+    upstairs_to.abs_tile.z = 1;
+    CHECK_EQ(stairs_level_change(*state, upstairs_from, upstairs_to), 0);
+    make_entity_low(*state, up.low_index);
+    CHECK_EQ(stairs_level_change(*state, at(10, mid), at(11, 0.1f)), 0);
+
+    // They don't block movement.
+    const Entity point = add_test_entity(*state, {}, k_point_dim);
+    make_entity_high(*state, up.low_index);
+    CHECK(!try_move(*state, point, at(10, mid), {side, 0.0f}).blocked);
+}
