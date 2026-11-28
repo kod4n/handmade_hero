@@ -19,6 +19,15 @@ static_assert(sign(0) == 0);
 static_assert(sign(INT32_MAX) == 1);
 static_assert(sign(INT32_MIN) == -1);  // no negation, so no overflow
 
+// Qualified: with `using namespace hh`, a bare abs/atan2 is ambiguous with
+// the global ones from <cmath>/<stdlib.h>.
+static_assert(hh::abs(5) == 5);
+static_assert(hh::abs(-5) == 5);
+static_assert(hh::abs(0) == 0);
+static_assert(hh::abs(INT32_MAX) == INT32_MAX);
+static_assert(hh::abs(-INT32_MAX) == INT32_MAX);
+static_assert(hh::abs(INT32_MIN) == INT32_MIN);  // no positive i32 to return; wraps, no UB
+
 // ---- Arena ----
 
 TEST(arena_aligns_pushes) {
@@ -85,6 +94,36 @@ TEST(random_is_deterministic_and_in_range) {
 }
 
 // ---- intrinsics.h / defer.h ----
+
+TEST(abs_f32) {
+    CHECK_EQ(hh::abs(1.5f), 1.5f);
+    CHECK_EQ(hh::abs(-1.5f), 1.5f);
+    CHECK_EQ(hh::abs(0.0f), 0.0f);
+    CHECK(!std::signbit(hh::abs(-0.0f)));  // -0 becomes +0
+    CHECK_EQ(hh::abs(-INFINITY), INFINITY);
+}
+
+// Arguments in the standard order, y first: hh::atan2(1, 0) is straight up.
+TEST(atan2_takes_y_then_x) {
+    constexpr f32 pi = 3.14159265f;
+    CHECK_NEAR(hh::atan2(1.0f, 0.0f), 0.5f * pi, 1e-6f);
+    CHECK_NEAR(hh::atan2(0.0f, 1.0f), 0.0f, 1e-6f);
+    CHECK_NEAR(hh::atan2(0.0f, -1.0f), pi, 1e-6f);
+    CHECK_NEAR(hh::atan2(-1.0f, 0.0f), -0.5f * pi, 1e-6f);
+    CHECK_NEAR(hh::atan2(1.0f, 1.0f), 0.25f * pi, 1e-6f);
+}
+
+// rotate_left/right use _rotl/_rotr on MSVC-compatible compilers and
+// std::rotl/rotr elsewhere; both must agree, including negative amounts.
+TEST(rotate) {
+    CHECK_EQ(rotate_left(0x80000001u, 1), 0x00000003u);
+    CHECK_EQ(rotate_right(0x80000001u, 1), 0xC0000000u);
+    CHECK_EQ(rotate_left(0x12345678u, 0), 0x12345678u);
+    CHECK_EQ(rotate_left(0x12345678u, 32), 0x12345678u);
+    CHECK_EQ(rotate_left(0x12345678u, 8), 0x34567812u);
+    CHECK_EQ(rotate_left(0x12345678u, -8), rotate_right(0x12345678u, 8));
+    CHECK_EQ(rotate_right(0x12345678u, -8), rotate_left(0x12345678u, 8));
+}
 
 TEST(bitscan_forward) {
     CHECK(!bitscan_forward(0).found);
