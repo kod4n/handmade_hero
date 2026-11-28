@@ -25,26 +25,13 @@ enum class CameraMode : u32 {
     Follow,  // centered on the player
 };
 
-// Something that lives in the world. For now every entity is a player.
-struct Entity {
-    bool exists;
-    WorldPosition pos;  // bottom-center
-    Vec2 vel;           // meters per second
-    Facing facing;      // last direction moved in; kept while idle
-    f32 width;          // meters, of the drawn body
-    f32 height;         // meters, of the drawn body
-    // Meters. The patch of ground it stands on, centered on pos; this, not
-    // width x height, is what collides with walls.
-    Vec2 collision_dim;
-};
-
 struct LowEntity {
-    WorldPosition pos;
-    f32 width;
-    f32 height;
-    Facing facing;
-    Vec2 collision_dim;
-    u32 high_index;
+    WorldPosition pos;   // bottom-center
+    f32 width;           // meters, of the drawn body
+    f32 height;          // meters, of the drawn body
+    Facing facing;       // last direction moved in; kept while idle
+    Vec2 collision_dim;  // vector used for entity collision detection
+    u32 high_index;      // ref to high entity
 };
 
 struct HighEntity {
@@ -64,10 +51,8 @@ struct GameState {
     Vec2 camera_vel;           // meters per second, of the easing spring
     f32 debug_zoom;            // render scale; < 1 zooms out to inspect the map
     // Entity indices. Slot 0 is reserved and never used, so 0 means "none".
-    u32 camera_entity_index;                             // who the camera tracks
-    u32 player_index_for_controller[k_max_controllers];  // set when Start joins
-    u32 entity_count;                                    // slots handed out so far, counting the reserved 0
-    Entity entities[k_max_entities];
+    u32 camera_entity_index;                             // who the camera tracks, low entity index
+    u32 player_index_for_controller[k_max_controllers];  // set when Start joins, low entity indexes
     LowEntity low_entities[k_max_entities];
     u32 low_entity_count;
     HighEntity high_entities[k_max_high_entities];

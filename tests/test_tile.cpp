@@ -4,6 +4,7 @@
 #include "test.h"
 #include "test_support.h"
 #include "defer.h"
+#include "random.h"
 #include "tile.cpp"
 
 using namespace hh;
@@ -219,7 +220,7 @@ static void fill_walled_room(Arena& arena, World& world) {
 }
 
 // Zero size: the walls don't grow, so it collides exactly as a point.
-static constexpr Entity k_point = {};
+static constexpr Vec2 k_collision_dim = {};
 
 TEST(try_move_stops_at_first_wall) {
     World* world = make_world();
@@ -231,7 +232,7 @@ TEST(try_move_stops_at_first_wall) {
 
     // Open floor: not blocked, the whole move is taken.
     const WorldPosition center = {.abs_tile = {.x = 11, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
-    MoveResult clear = try_move(*world, k_point, center, {0.3f, -0.2f});
+    MoveResult clear = try_move(*world, k_collision_dim, center, {0.3f, -0.2f});
     CHECK(!clear.blocked);
     CHECK_EQ(clear.t, 1.0f);
     CHECK_EQ(clear.new_pos.abs_tile.x, 11);
@@ -240,9 +241,8 @@ TEST(try_move_stops_at_first_wall) {
 
     // Into the right wall, 0.05 away with a 0.1 move: stops halfway, just
     // short of the wall, with the normal pointing back out of it.
-    const WorldPosition by_right =
-        {.abs_tile = {.x = 12, .y = 11, .z = 0}, .tile_rel = {side - 0.05f, mid}};
-    MoveResult right = try_move(*world, k_point, by_right, {0.1f, 0.0f});
+    const WorldPosition by_right = {.abs_tile = {.x = 12, .y = 11, .z = 0}, .tile_rel = {side - 0.05f, mid}};
+    MoveResult right = try_move(*world, k_collision_dim, by_right, {0.1f, 0.0f});
     CHECK(right.blocked);
     CHECK_NEAR(right.t, 0.5f, 1e-3f);
     CHECK_EQ(right.new_pos.abs_tile.x, 12);
@@ -252,23 +252,22 @@ TEST(try_move_stops_at_first_wall) {
 
     // Into the left wall: normal points right.
     const WorldPosition by_left = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = {0.05f, mid}};
-    MoveResult left = try_move(*world, k_point, by_left, {-0.1f, 0.0f});
+    MoveResult left = try_move(*world, k_collision_dim, by_left, {-0.1f, 0.0f});
     CHECK(left.blocked);
     CHECK_EQ(left.new_pos.abs_tile.x, 10);
     CHECK_EQ(left.wall_normal, (Vec2{1.0f, 0.0f}));
 
     // Down into the bottom wall: normal points up (world y is up).
     const WorldPosition by_bottom = {.abs_tile = {.x = 11, .y = 10, .z = 0}, .tile_rel = {mid, 0.05f}};
-    MoveResult bottom = try_move(*world, k_point, by_bottom, {0.0f, -0.1f});
+    MoveResult bottom = try_move(*world, k_collision_dim, by_bottom, {0.0f, -0.1f});
     CHECK(bottom.blocked);
     CHECK_EQ(bottom.new_pos.abs_tile.y, 10);
     CHECK_EQ(bottom.wall_normal, (Vec2{0.0f, 1.0f}));
 
     // Diagonally toward the top-right corner, nearer the right wall than the
     // top one but moving so the top face is crossed first (t 0.4 vs 0.5).
-    const WorldPosition by_corner =
-        {.abs_tile = {.x = 12, .y = 12, .z = 0}, .tile_rel = {side - 0.05f, side - 0.04f}};
-    MoveResult corner = try_move(*world, k_point, by_corner, {0.1f, 0.1f});
+    const WorldPosition by_corner = {.abs_tile = {.x = 12, .y = 12, .z = 0}, .tile_rel = {side - 0.05f, side - 0.04f}};
+    MoveResult corner = try_move(*world, k_collision_dim, by_corner, {0.1f, 0.1f});
     CHECK(corner.blocked);
     CHECK_NEAR(corner.t, 0.4f, 1e-3f);
     CHECK_EQ(corner.wall_normal, (Vec2{0.0f, -1.0f}));
@@ -286,7 +285,7 @@ TEST(try_move_does_not_tunnel_through_walls) {
     const f32 mid = 0.5f * side;
 
     const WorldPosition start = {.abs_tile = {.x = 12, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
-    MoveResult move = try_move(*world, k_point, start, {2.0f * side, 0.0f});
+    MoveResult move = try_move(*world, k_collision_dim, start, {2.0f * side, 0.0f});
     CHECK(move.blocked);
     CHECK_NEAR(move.t, 0.25f, 1e-3f);
     CHECK_EQ(move.new_pos.abs_tile.x, 12);
@@ -303,12 +302,12 @@ TEST(try_move_only_blocks_moving_into_a_face) {
 
     // Resting exactly on the left wall's face: stepping away is free...
     const WorldPosition on_face = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = {0.0f, mid}};
-    MoveResult away = try_move(*world, k_point, on_face, {0.1f, 0.0f});
+    MoveResult away = try_move(*world, k_collision_dim, on_face, {0.1f, 0.0f});
     CHECK(!away.blocked);
     CHECK_NEAR(away.new_pos.tile_rel.x, 0.1f, 1e-5f);
 
     // ...and stepping into it goes nowhere.
-    MoveResult into = try_move(*world, k_point, on_face, {-0.1f, 0.0f});
+    MoveResult into = try_move(*world, k_collision_dim, on_face, {-0.1f, 0.0f});
     CHECK(into.blocked);
     CHECK_EQ(into.t, 0.0f);
     CHECK_EQ(into.new_pos.abs_tile.x, 10);
@@ -316,14 +315,14 @@ TEST(try_move_only_blocks_moving_into_a_face) {
 
     // Moving along a wall, parallel to its face, isn't blocked.
     const WorldPosition by_wall = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = {0.01f, mid}};
-    MoveResult along = try_move(*world, k_point, by_wall, {0.0f, side});
+    MoveResult along = try_move(*world, k_collision_dim, by_wall, {0.0f, side});
     CHECK(!along.blocked);
     CHECK_EQ(along.new_pos.abs_tile.y, 12);
 
     // Stuck inside a wall: the faces only block from outside, so it can
     // walk back out onto the floor.
     const WorldPosition in_wall = {.abs_tile = {.x = 13, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
-    MoveResult out = try_move(*world, k_point, in_wall, {-side, 0.0f});
+    MoveResult out = try_move(*world, k_collision_dim, in_wall, {-side, 0.0f});
     CHECK(!out.blocked);
     CHECK_EQ(out.new_pos.abs_tile.x, 12);
 }
@@ -335,14 +334,14 @@ TEST(try_move_keeps_entity_size_out_of_walls) {
     fill_walled_room(arena, *world);
     const f32 side = world->tile_side_in_meters;
     const f32 mid = 0.5f * side;
-    const Entity box = {.collision_dim = {0.5f, 0.5f}};
+    const Vec2 collision_dim = {0.5f, 0.5f};
     const f32 half = 0.25f;
 
     // From the room's center toward the right wall (the left face of tile
     // 13): the center stops half the width short of the face, not on it.
     // That's 2 * side - mid - half = 1.85 of the 2.0 move.
     const WorldPosition center = {.abs_tile = {.x = 11, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
-    MoveResult right = try_move(*world, box, center, {2.0f, 0.0f});
+    MoveResult right = try_move(*world, collision_dim, center, {2.0f, 0.0f});
     CHECK(right.blocked);
     CHECK_NEAR(right.t, 0.925f, 1e-3f);
     CHECK_EQ(right.new_pos.abs_tile.x, 12);
@@ -353,14 +352,14 @@ TEST(try_move_keeps_entity_size_out_of_walls) {
     // edge reaches into wall tile 13, so the search has to look past the
     // tiles the center passes through.
     const WorldPosition near_right = {.abs_tile = {.x = 12, .y = 11, .z = 0}, .tile_rel = {side - 0.3f, mid}};
-    MoveResult edge = try_move(*world, box, near_right, {0.1f, 0.0f});
+    MoveResult edge = try_move(*world, collision_dim, near_right, {0.1f, 0.0f});
     CHECK(edge.blocked);
     CHECK_NEAR(edge.t, 0.5f, 1e-3f);
     CHECK_NEAR(edge.new_pos.tile_rel.x, side - half, 1e-3f);
 
     // Same for y: the box's bottom edge hits the wall row at y = 9.
     const WorldPosition near_bottom = {.abs_tile = {.x = 11, .y = 10, .z = 0}, .tile_rel = {mid, 0.3f}};
-    MoveResult down = try_move(*world, box, near_bottom, {0.0f, -0.1f});
+    MoveResult down = try_move(*world, collision_dim, near_bottom, {0.0f, -0.1f});
     CHECK(down.blocked);
     CHECK_NEAR(down.new_pos.tile_rel.y, half, 1e-3f);
     CHECK_EQ(down.wall_normal, (Vec2{0.0f, 1.0f}));

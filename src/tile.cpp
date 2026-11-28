@@ -2,7 +2,6 @@
 #include "arena.h"
 #include "tile.h"
 #include "vec.h"
-#include "game.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -180,17 +179,17 @@ static bool test_wall(
     return hit;
 }
 
-// Moves the entity by delta from `from`, stopping at the first unwalkable tile
-// along the way. The entity is its collision_dim box centered on `from`. Each wall
-// is grown by that box (their Minkowski sum), so the box hits a wall exactly when its
-// center point hits the grown wall, and only that point's path has to be traced.
+// Moves a collision_dim box, centered on `from`, by delta, stopping at the
+// first unwalkable tile along the way. Each wall is grown by the box (their
+// Minkowski sum), so the box hits a wall exactly when its center point hits
+// the grown wall, and only that point's path has to be traced.
 // Every tile in the rectangle spanned by the start and end tiles, widened by the
 // box's half size, is checked, and the four faces of each unwalkable one's grown box
 // are intersected with the path, so a fast move can't skip over a wall.
-MoveResult try_move(World& world, const Entity& entity, const WorldPosition& from, Vec2 delta) {
+MoveResult try_move(World& world, Vec2 collision_dim, const WorldPosition& from, Vec2 delta) {
     const WorldPosition to = world_pos_offset(world, from, delta);
     const f32 side = world.tile_side_in_meters;
-    const Vec2 half_size = 0.5f * entity.collision_dim;
+    const Vec2 half_size = 0.5f * collision_dim;
     const u32 pad_x = static_cast<u32>(ceilf(half_size.x / side));
     const u32 pad_y = static_cast<u32>(ceilf(half_size.y / side));
     const u32 min_tile_x = std::min(from.abs_tile.x, to.abs_tile.x) - pad_x;
