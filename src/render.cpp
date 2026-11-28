@@ -37,6 +37,15 @@ void render_rect(ScreenBuffer& buffer, Vec2 min, Vec2 max, Color color) {
     }
 }
 
+// creates a border using the provided thickness and color
+// the min and max vectors are taken from the top left as origin
+void render_rect_outline(ScreenBuffer& buffer, Vec2 min, Vec2 max, f32 thickness, Color color) {
+    render_rect(buffer, min, {max.x, min.y + thickness}, color);
+    render_rect(buffer, {min.x, max.y - thickness}, max, color);
+    render_rect(buffer, {min.x, min.y + thickness}, {min.x + thickness, max.y - thickness}, color);
+    render_rect(buffer, {max.x - thickness, min.y + thickness}, {max.x, max.y - thickness}, color);
+}
+
 // Stretches the bitmap over the whole buffer, nearest-neighbor.
 void draw_bitmap_fullscreen(ScreenBuffer& buffer, const LoadedBitmap& bitmap) {
     if (!bitmap.pixels) {

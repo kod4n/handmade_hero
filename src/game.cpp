@@ -494,7 +494,13 @@ extern "C" void game_render(
                 if (k_dev_mode) {
                     const Vec2 half_collision = 0.5f * m2p * entity.collision_dim;
                     constexpr Color collision_color = {.r = 1.0f, .g = 0.0f, .b = 1.0f};
-                    render_rect(buffer, ground_pos - half_collision, ground_pos + half_collision, collision_color);
+                    render_rect_outline(
+                        buffer,
+                        ground_pos - half_collision,
+                        ground_pos + half_collision,
+                        2.0f,
+                        collision_color
+                    );
                 }
                 break;
             }
@@ -522,10 +528,7 @@ extern "C" void game_render(
         const Vec2 area_max = screen_center + half;
         constexpr f32 thickness = 2.0f;  // pixels
         constexpr Color outline_color = {.r = 1.0f, .g = 0.8f, .b = 0.0f};
-        render_rect(buffer, area_min, {area_max.x, area_min.y + thickness}, outline_color);
-        render_rect(buffer, {area_min.x, area_max.y - thickness}, area_max, outline_color);
-        render_rect(buffer, area_min, {area_min.x + thickness, area_max.y}, outline_color);
-        render_rect(buffer, {area_max.x - thickness, area_min.y}, area_max, outline_color);
+        render_rect_outline(buffer, area_min, area_max, thickness, outline_color);
     }
 }
 
