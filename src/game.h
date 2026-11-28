@@ -38,7 +38,23 @@ struct Entity {
     Vec2 collision_dim;
 };
 
+struct LowEntity {
+    WorldPosition pos;
+    f32 width;
+    f32 height;
+    Facing facing;
+    Vec2 collision_dim;
+    u32 high_index;
+};
+
+struct HighEntity {
+    Vec2 pos;
+    Vec2 vel;
+    u32 low_index;
+};
+
 inline constexpr u32 k_max_entities = 256;
+inline constexpr u32 k_max_high_entities = 64;
 
 // Always the first allocation in Storage::main.
 struct GameState {
@@ -51,6 +67,10 @@ struct GameState {
     u32 player_index_for_controller[k_max_controllers];  // set when Start joins
     u32 entity_count;                                    // slots handed out so far, counting the reserved 0
     Entity entities[k_max_entities];
+    LowEntity low_entities[k_max_entities];
+    u32 low_entity_count;
+    HighEntity high_entities[k_max_high_entities];
+    u32 high_entity_count;
     World world;
     LoadedBitmap background;
     LoadedBitmap hero[static_cast<u32>(Facing::Count)];

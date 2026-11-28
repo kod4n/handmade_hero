@@ -2,6 +2,7 @@
 #include <cmath>
 #include "platform.h"
 #include "render.h"
+#include "tile.h"
 #include "vec.h"
 #include "random.h"
 #include "tile.cpp"
@@ -9,6 +10,8 @@
 #include "asset.cpp"
 
 namespace hh {
+
+static void generate_world(Arena& arena, World& world);
 
 // Center of the room (one screen of tiles) that pos is in.
 static WorldPosition room_center(World& world, const WorldPosition& pos) {
@@ -44,10 +47,79 @@ static u32 add_entity(GameState& state) {
     return index;
 }
 
+static void make_entity_high(GameState& state, u32 low_index) {
+    assert(low_index > 0 && low_index < state.low_entity_count);
+    LowEntity& low = state.low_entities[low_index];
+    if (low.high_index || state.high_entity_count == k_max_high_entities) {
+        return;
+    }
+    const u32 high_index = state.high_entity_count++;
+    HighEntity& high = state.high_entities[high_index];
+    high = {
+        .pos = world_pos_diff(state.world, low.pos, state.camera_pos),
+        .low_index = low_index,
+    };
+    low.high_index = high_index;
+}
+
+static void make_entity_low(GameState& state, u32 low_index) {
+    assert(low_index > 0 && low_index < state.low_entity_count);
+    LowEntity& low = state.low_entities[low_index];
+    const u32 high_index = low.high_index;
+    if (!high_index) {
+        return;
+    }
+
+    const u32 last = --state.high_entity_count;
+    if (high_index != last) {
+        state.high_entities[high_index] = state.high_entities[last];
+        state.low_entities[state.high_entities[high_index].low_index].high_index = high_index;
+    }
+    low.high_index = 0;
+}
+
 // Where new players appear: the middle of tile (1, 3) in the first room.
 static WorldPosition player_spawn_pos(const World& world) {
     const WorldPosition tile = {.abs_tile = {.x = 8, .y = 4, .z = 0}, .tile_rel = {}};
     return world_pos_offset(world, tile, 0.5f * Vec2{world.tile_side_in_meters, world.tile_side_in_meters});
+}
+
+static bool in_camera_area(const World& world, Vec2 rel) {
+    constexpr f32 tile_margin = 2.0f;
+    const Vec2 tile_area = {k_screen_tile_cols + 2.0f * tile_margin, k_screen_tile_rows + 2.0f * tile_margin};
+    const Vec2 half_size = 0.5f * world.tile_side_in_meters * tile_area;
+
+    return fabsf(rel.x) <= half_size.x && fabsf(rel.y) <= half_size.y;
+}
+
+static void set_camera(GameState& state, const WorldPosition& new_pos) {
+    const Vec2 camera_delta = world_pos_diff(state.world, new_pos, state.camera_pos);
+    if (new_pos.abs_tile.z != state.camera_pos.abs_tile.z) {
+        while (state.high_entity_count > 1) {
+            make_entity_low(state, state.high_entities[state.high_entity_count - 1].low_index);
+        }
+    } else {
+        for (u32 high_index = state.high_entity_count - 1; high_index > 0; high_index--) {
+            auto& high_entity = state.high_entities[high_index];
+            high_entity.pos -= camera_delta;
+            if (!in_camera_area(state.world, high_entity.pos)) {
+                make_entity_low(state, high_entity.low_index);
+            }
+        }
+    }
+
+    state.camera_pos = new_pos;
+
+    for (u32 low_index = 1; low_index < state.low_entity_count; low_index++) {
+        LowEntity& low_entity = state.low_entities[low_index];
+        if (low_entity.high_index != 0 || low_entity.pos.abs_tile.z != new_pos.abs_tile.z) {
+            continue;
+        }
+
+        if (in_camera_area(state.world, world_pos_diff(state.world, low_entity.pos, new_pos))) {
+            make_entity_high(state, low_index);
+        }
+    }
 }
 
 // Hero sprite layout, in bitmap pixels (see make_hero in tools/make_bitmaps.py):
@@ -76,6 +148,15 @@ static void init_player(GameState& state, u32 index) {
     if (!get_entity(state, state.camera_entity_index)) {
         state.camera_entity_index = index;
     }
+
+    state.low_entities[state.low_entity_count++] = {
+        .pos = entity->pos,
+        .width = entity->width,
+        .height = entity->height,
+        .facing = entity->facing,
+        .collision_dim = entity->collision_dim,
+        .high_index = 0,
+    };
 }
 
 // Moves an entity for one frame. input_dir is the stick or keys (capped to
@@ -212,15 +293,13 @@ extern "C" void game_render(
         state->debug_zoom = 1.0f;
         // Slot 0 stays unused so index 0 can mean "no entity".
         add_entity(*state);
+        state->low_entity_count = 1;
+        state->high_entity_count = 1;
 
         World& world = state->world;
         world.tile_side_in_meters = k_tile_side_in_meters;
         world.tile_side_in_pixels = k_tile_side_in_pixels;
         world.meters_to_pixels = world.tile_side_in_pixels / world.tile_side_in_meters;
-
-        // Start already framing the first room instead of easing in to it.
-        state->camera_mode = CameraMode::Room;
-        state->camera_pos = room_center(world, player_spawn_pos(world));
 
         // The keyboard player starts in the game; gamepads join with Start.
         // Every platform puts the keyboard in controllers[0].
@@ -228,91 +307,12 @@ extern "C" void game_render(
         const u32 keyboard_player = add_entity(*state);
         init_player(*state, keyboard_player);
         state->player_index_for_controller[keyboard_controller] = keyboard_player;
-        // world.chunk_hash starts empty: storage.main comes zeroed from the
-        // platform. Chunks are created as the screens below write into them,
-        // and new chunks start out as all wall.
 
-        // Generate a path of walled screens across two levels (z 0 and 1).
-        // Each screen leaves through a door on its right or top edge, or
-        // through stairs to the same screen on the other level, chosen from
-        // the random table. The next screen opens the matching door on its
-        // left or bottom edge, or the opposite stairs in the same spot. Row 0
-        // is the bottom of a screen.
-        //
-        // The path only moves right or up: stepping left/down from screen 0
-        // would wrap the u32 tile coordinates. Two level changes in a row
-        // would lead back onto the screen just generated, so stairs are never
-        // chosen right after arriving by stairs.
-        constexpr u32 screen_count = 100;
-        constexpr u32 door_col = k_screen_tile_cols / 2;
-        constexpr u32 door_row = k_screen_tile_rows / 2;
-        constexpr u32 stairs_col = k_screen_tile_cols / 2 + 4;
-        constexpr u32 stairs_row = k_screen_tile_rows / 2 + 2;
-        RandomSeries series = {};
-        u32 screen_x = 0;
-        u32 screen_y = 0;
-        u32 screen_z = 0;
-        bool door_left = false;
-        bool door_bottom = false;
-        u32 arrival_stairs = k_tile_empty;  // stairs this screen was entered by, if any
-        for (u32 screen = 0; screen < screen_count; screen++) {
-            bool door_right = false;
-            bool door_top = false;
-            bool take_stairs = false;
-            switch (random_choice(series, arrival_stairs == k_tile_empty ? 3 : 2)) {
-            case 0:
-                door_right = true;
-                break;
-            case 1:
-                door_top = true;
-                break;
-            default:
-                take_stairs = true;
-                break;
-            }
-            const u32 departure_stairs = screen_z == 0 ? k_tile_stairs_up : k_tile_stairs_down;
+        // Start already framing the first room instead of easing in to it.
+        state->camera_mode = CameraMode::Room;
+        set_camera(*state, room_center(world, player_spawn_pos(world)));
 
-            for (u32 row = 0; row < k_screen_tile_rows; row++) {
-                for (u32 col = 0; col < k_screen_tile_cols; col++) {
-                    bool wall = row == 0 || row == k_screen_tile_rows - 1 || col == 0 || col == k_screen_tile_cols - 1;
-                    if ((col == 0 && door_left) || (col == k_screen_tile_cols - 1 && door_right)) {
-                        wall = wall && row != door_row;
-                    }
-                    if ((row == 0 && door_bottom) || (row == k_screen_tile_rows - 1 && door_top)) {
-                        wall = wall && col != door_col;
-                    }
-                    u32 value = wall ? k_tile_wall : k_tile_empty;
-                    if (col == stairs_col && row == stairs_row) {
-                        if (take_stairs) {
-                            value = departure_stairs;
-                        } else if (arrival_stairs != k_tile_empty) {
-                            value = arrival_stairs;
-                        }
-                    }
-                    set_tile_value(
-                        state->permanent_arena,
-                        world,
-                        screen_x * k_screen_tile_cols + col,
-                        screen_y * k_screen_tile_rows + row,
-                        screen_z,
-                        value
-                    );
-                }
-            }
-
-            door_left = door_right;
-            door_bottom = door_top;
-            arrival_stairs = k_tile_empty;
-            if (door_right) {
-                screen_x++;
-            } else if (door_top) {
-                screen_y++;
-            } else {
-                // The other level's screen has stairs leading back here.
-                arrival_stairs = departure_stairs == k_tile_stairs_up ? k_tile_stairs_down : k_tile_stairs_up;
-                screen_z = 1 - screen_z;
-            }
-        }
+        generate_world(state->permanent_arena, world);
 
         storage.is_initialized = true;
     }
@@ -389,9 +389,10 @@ extern "C" void game_render(
             state->camera_mode == CameraMode::Room ? room_center(world, followed->pos) : followed->pos;
         f32 t = 1.0f - expf(-camera_stiffness * input.frame_dt);
         Vec2 step = t * world_pos_diff(world, target, state->camera_pos);
-        state->camera_pos = world_pos_offset(world, state->camera_pos, step);
-        // Levels don't ease; the view switches with the player.
-        state->camera_pos.abs_tile.z = followed->pos.abs_tile.z;
+
+        WorldPosition new_camera = world_pos_offset(world, state->camera_pos, step);
+        new_camera.abs_tile.z = followed->pos.abs_tile.z;
+        set_camera(*state, new_camera);
     }
 
     // clear
@@ -511,6 +512,94 @@ extern "C" void game_render(
             Vec2 half_collision = 0.5f * m2p * entity.collision_dim;
             constexpr Color collision_color = {.r = 1.0f, .g = 0.0f, .b = 1.0f};
             render_rect(buffer, ground_pos - half_collision, ground_pos + half_collision, collision_color);
+        }
+    }
+}
+
+// Generate a path of walled screens across two levels (z 0 and 1).
+// Each screen leaves through a door on its right or top edge, or
+// through stairs to the same screen on the other level, chosen from
+// the random table. The next screen opens the matching door on its
+// left or bottom edge, or the opposite stairs in the same spot. Row 0
+// is the bottom of a screen.
+//
+// The path only moves right or up: stepping left/down from screen 0
+// would wrap the u32 tile coordinates. Two level changes in a row
+// would lead back onto the screen just generated, so stairs are never
+// chosen right after arriving by stairs.
+//
+// world.chunk_hash starts empty: storage.main comes zeroed from the
+// platform. Chunks are created as the screens write into them, and new
+// chunks start out as all wall, so everything outside the screens is wall.
+static void generate_world(Arena& arena, World& world) {
+    constexpr u32 screen_count = 100;
+    constexpr u32 door_col = k_screen_tile_cols / 2;
+    constexpr u32 door_row = k_screen_tile_rows / 2;
+    constexpr u32 stairs_col = k_screen_tile_cols / 2 + 4;
+    constexpr u32 stairs_row = k_screen_tile_rows / 2 + 2;
+    RandomSeries series = {};
+    u32 screen_x = 0;
+    u32 screen_y = 0;
+    u32 screen_z = 0;
+    bool door_left = false;
+    bool door_bottom = false;
+    u32 arrival_stairs = k_tile_empty;  // stairs this screen was entered by, if any
+    for (u32 screen = 0; screen < screen_count; screen++) {
+        bool door_right = false;
+        bool door_top = false;
+        bool take_stairs = false;
+        switch (random_choice(series, arrival_stairs == k_tile_empty ? 3 : 2)) {
+        case 0:
+            door_right = true;
+            break;
+        case 1:
+            door_top = true;
+            break;
+        default:
+            take_stairs = true;
+            break;
+        }
+        const u32 departure_stairs = screen_z == 0 ? k_tile_stairs_up : k_tile_stairs_down;
+
+        for (u32 row = 0; row < k_screen_tile_rows; row++) {
+            for (u32 col = 0; col < k_screen_tile_cols; col++) {
+                bool wall = row == 0 || row == k_screen_tile_rows - 1 || col == 0 || col == k_screen_tile_cols - 1;
+                if ((col == 0 && door_left) || (col == k_screen_tile_cols - 1 && door_right)) {
+                    wall = wall && row != door_row;
+                }
+                if ((row == 0 && door_bottom) || (row == k_screen_tile_rows - 1 && door_top)) {
+                    wall = wall && col != door_col;
+                }
+                u32 value = wall ? k_tile_wall : k_tile_empty;
+                if (col == stairs_col && row == stairs_row) {
+                    if (take_stairs) {
+                        value = departure_stairs;
+                    } else if (arrival_stairs != k_tile_empty) {
+                        value = arrival_stairs;
+                    }
+                }
+                set_tile_value(
+                    arena,
+                    world,
+                    screen_x * k_screen_tile_cols + col,
+                    screen_y * k_screen_tile_rows + row,
+                    screen_z,
+                    value
+                );
+            }
+        }
+
+        door_left = door_right;
+        door_bottom = door_top;
+        arrival_stairs = k_tile_empty;
+        if (door_right) {
+            screen_x++;
+        } else if (door_top) {
+            screen_y++;
+        } else {
+            // The other level's screen has stairs leading back here.
+            arrival_stairs = departure_stairs == k_tile_stairs_up ? k_tile_stairs_down : k_tile_stairs_up;
+            screen_z = 1 - screen_z;
         }
     }
 }
