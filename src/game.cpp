@@ -37,7 +37,7 @@ static Entity* get_entity(GameState& state, u32 index) {
     return entity;
 }
 
-// Hands out the next slot, leared. Returns 0 when every slot is taken.
+// Hands out the next slot, cleared. Returns 0 when every slot is taken.
 static u32 add_entity(GameState& state) {
     u32 index = 0;
     if (state.entity_count < std::size(state.entities)) {
@@ -47,8 +47,12 @@ static u32 add_entity(GameState& state) {
     return index;
 }
 
+// Gives a low entity a high slot, placed relative to the current camera.
+// Does nothing if it's already high or every high slot is taken. HighEntity
+// has no z, so the caller checks the entity is on the camera's level.
 static void make_entity_high(GameState& state, u32 low_index) {
     assert(low_index > 0 && low_index < state.low_entity_count);
+    assert(state.high_entity_count >= 1);  // slot 0 is reserved at init
     LowEntity& low = state.low_entities[low_index];
     if (low.high_index || state.high_entity_count == k_max_high_entities) {
         return;
@@ -62,6 +66,9 @@ static void make_entity_high(GameState& state, u32 low_index) {
     low.high_index = high_index;
 }
 
+// Drops a low entity's high slot, if it has one. Nothing is written back:
+// whatever moves a high entity must keep low.pos current as it goes. The last high entity is moved
+// into the freed slot, so other entities' high indices can change.
 static void make_entity_low(GameState& state, u32 low_index) {
     assert(low_index > 0 && low_index < state.low_entity_count);
     LowEntity& low = state.low_entities[low_index];
@@ -84,6 +91,9 @@ static WorldPosition player_spawn_pos(const World& world) {
     return world_pos_offset(world, tile, 0.5f * Vec2{world.tile_side_in_meters, world.tile_side_in_meters});
 }
 
+// Whether a point rel (meters from the camera) is in the area whose entities
+// are kept high: a room plus a margin, so the player isn't demoted while the
+// camera lags behind it in a doorway or in Follow mode.
 static bool in_camera_area(const World& world, Vec2 rel) {
     constexpr f32 tile_margin = 2.0f;
     const Vec2 tile_area = {k_screen_tile_cols + 2.0f * tile_margin, k_screen_tile_rows + 2.0f * tile_margin};
@@ -92,6 +102,10 @@ static bool in_camera_area(const World& world, Vec2 rel) {
     return fabsf(rel.x) <= half_size.x && fabsf(rel.y) <= half_size.y;
 }
 
+// The only place camera_pos changes. High positions are relative to the
+// camera, so they're shifted by its move; then entities that left the camera
+// area are demoted and ones that entered it are promoted. A level change
+// demotes everything, since high entities are all on the camera's level.
 static void set_camera(GameState& state, const WorldPosition& new_pos) {
     const Vec2 camera_delta = world_pos_diff(state.world, new_pos, state.camera_pos);
     if (new_pos.abs_tile.z != state.camera_pos.abs_tile.z) {
@@ -100,7 +114,7 @@ static void set_camera(GameState& state, const WorldPosition& new_pos) {
         }
     } else {
         for (u32 high_index = state.high_entity_count - 1; high_index > 0; high_index--) {
-            auto& high_entity = state.high_entities[high_index];
+            HighEntity& high_entity = state.high_entities[high_index];
             high_entity.pos -= camera_delta;
             if (!in_camera_area(state.world, high_entity.pos)) {
                 make_entity_low(state, high_entity.low_index);
@@ -149,13 +163,21 @@ static void init_player(GameState& state, u32 index) {
         state.camera_entity_index = index;
     }
 
-    state.low_entities[state.low_entity_count++] = {
+    // Mirror into a low entity until the old array goes. Both arrays hand
+    // out slots in the same order, so the low index matches `index`, which
+    // is what player_index_for_controller and camera_entity_index hold.
+    assert(state.low_entity_count >= 1);  // slot 0 is reserved at init
+    if (state.low_entity_count == std::size(state.low_entities)) {
+        return;
+    }
+    const u32 low_index = state.low_entity_count++;
+    assert(low_index == index);
+    state.low_entities[low_index] = {
         .pos = entity->pos,
         .width = entity->width,
         .height = entity->height,
         .facing = entity->facing,
         .collision_dim = entity->collision_dim,
-        .high_index = 0,
     };
 }
 
@@ -381,14 +403,26 @@ extern "C" void game_render(
 
     // Ease the camera toward its target: the followed player's room, or the
     // player. Entering a new room moves the target, so the camera scrolls
-    // over to it. 1 - exp(-k * dt) closes the same fraction of the gap per
-    // second regardless of frame rate. Until someone joins, it stays put.
+    // over to it. Until someone joins, it stays put.
+    //
+    // A critically damped spring: unlike moving a fixed fraction of the gap
+    // each frame, which starts at full speed, it speeds up and slows down
+    // smoothly, and never overshoots. This is the spring's exact solution
+    // over dt, so it's stable and frame-rate independent at any dt:
+    //   x' = (x + (v + w x) dt) e^(-w dt)
+    //   v' = (v - w (v + w x) dt) e^(-w dt)
+    // where x is the camera's offset from the target.
     if (const Entity* followed = get_entity(*state, state->camera_entity_index)) {
-        constexpr f32 camera_stiffness = 8.0f;  // 1/s, higher = tighter follow
+        constexpr f32 camera_omega = 10.0f;  // 1/s, higher = tighter; settles in about 6.6 / omega s
         const WorldPosition target =
             state->camera_mode == CameraMode::Room ? room_center(world, followed->pos) : followed->pos;
-        f32 t = 1.0f - expf(-camera_stiffness * input.frame_dt);
-        Vec2 step = t * world_pos_diff(world, target, state->camera_pos);
+        const f32 dt = input.frame_dt;
+        const Vec2 x = world_pos_diff(world, state->camera_pos, target);
+        const Vec2 temp = dt * (state->camera_vel + camera_omega * x);
+        const f32 decay = expf(-camera_omega * dt);
+        state->camera_vel = decay * (state->camera_vel - camera_omega * temp);
+        const Vec2 new_x = decay * (x + temp);
+        const Vec2 step = new_x - x;
 
         WorldPosition new_camera = world_pos_offset(world, state->camera_pos, step);
         new_camera.abs_tile.z = followed->pos.abs_tile.z;

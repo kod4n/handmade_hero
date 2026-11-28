@@ -61,6 +61,7 @@ struct GameState {
     Arena permanent_arena;     // remainder of Storage::main after GameState
     WorldPosition camera_pos;  // world point drawn at the center of the screen
     CameraMode camera_mode;    // what camera_pos eases toward; ActionDown toggles it
+    Vec2 camera_vel;           // meters per second, of the easing spring
     f32 debug_zoom;            // render scale; < 1 zooms out to inspect the map
     // Entity indices. Slot 0 is reserved and never used, so 0 means "none".
     u32 camera_entity_index;                             // who the camera tracks
