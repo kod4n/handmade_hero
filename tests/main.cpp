@@ -18,6 +18,7 @@
 #include "test_core.cpp"
 #include "test_vec.cpp"
 #include "test_tile.cpp"
+#include "test_entity.cpp"
 #include "test_render.cpp"
 #include "test_asset.cpp"
 

@@ -65,15 +65,4 @@ struct WorldPosition {
     Vec2 tile_rel;
 };
 
-// Result of try_move. t is the fraction of the requested delta that was
-// travelled (1 when nothing was in the way), and new_pos is where that left
-// the entity. On a block, wall_normal is the unit outward normal of the wall
-// face hit first; it's always axis-aligned.
-struct MoveResult {
-    bool blocked;
-    f32 t;
-    WorldPosition new_pos;
-    Vec2 wall_normal;
-};
-
 }  // namespace hh

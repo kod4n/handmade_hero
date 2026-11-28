@@ -6,12 +6,13 @@
 #include "vec.h"
 #include "random.h"
 #include "tile.cpp"
+#include "entity.cpp"
 #include "render.cpp"
 #include "asset.cpp"
 
 namespace hh {
 
-static void generate_world(Arena& arena, World& world);
+static void generate_world(GameState& state);
 
 // Center of the room (one screen of tiles) that pos is in.
 static WorldPosition room_center(World& world, const WorldPosition& pos) {
@@ -26,67 +27,6 @@ static WorldPosition room_center(World& world, const WorldPosition& pos) {
         .y = 0.5f * k_screen_tile_rows,
     };
     return world_pos_offset(world, room_corner, world.tile_side_in_meters * half_room_in_tiles);
-}
-
-// Hands out the next low entity slot, cleared. Returns 0 when every slot is taken.
-static u32 add_entity(GameState& state) {
-    assert(state.low_entity_count >= 1);
-    u32 index = 0;
-    if (state.low_entity_count < std::size(state.low_entities)) {
-        index = state.low_entity_count++;
-        state.low_entities[index] = {};
-    }
-    return index;
-}
-
-static Entity get_entity(GameState& state, u32 low_index) {
-    Entity entity = {};
-    if (low_index > 0 && low_index < state.low_entity_count) {
-        entity.low_index = low_index;
-        entity.low = &state.low_entities[low_index];
-        if (u32 high_index = entity.low->high_index) {
-            entity.high = &state.high_entities[high_index];
-        }
-    }
-    return entity;
-}
-
-// Gives a low entity a high slot, placed relative to the current camera.
-// Does nothing if it's already high or every high slot is taken. HighEntity
-// has no z, so the caller checks the entity is on the camera's level.
-static void make_entity_high(GameState& state, u32 low_index) {
-    assert(low_index > 0 && low_index < state.low_entity_count);
-    assert(state.high_entity_count >= 1);  // slot 0 is reserved at init
-    LowEntity& low = state.low_entities[low_index];
-    if (low.high_index || state.high_entity_count == k_max_high_entities) {
-        return;
-    }
-    const u32 high_index = state.high_entity_count++;
-    HighEntity& high = state.high_entities[high_index];
-    high = {
-        .pos = world_pos_diff(state.world, low.pos, state.camera_pos),
-        .low_index = low_index,
-    };
-    low.high_index = high_index;
-}
-
-// Drops a low entity's high slot, if it has one. Nothing is written back:
-// whatever moves a high entity must keep low.pos current as it goes. The last high entity is moved
-// into the freed slot, so other entities' high indices can change.
-static void make_entity_low(GameState& state, u32 low_index) {
-    assert(low_index > 0 && low_index < state.low_entity_count);
-    LowEntity& low = state.low_entities[low_index];
-    const u32 high_index = low.high_index;
-    if (!high_index) {
-        return;
-    }
-
-    const u32 last = --state.high_entity_count;
-    if (high_index != last) {
-        state.high_entities[high_index] = state.high_entities[last];
-        state.low_entities[state.high_entities[high_index].low_index].high_index = high_index;
-    }
-    low.high_index = 0;
 }
 
 // Hero sprite layout, in bitmap pixels (see make_hero in tools/make_bitmaps.py):
@@ -110,6 +50,7 @@ static void init_player(GameState& state, u32 low_index) {
     if (!entity.low) {
         return;
     }
+    entity.low->type = EntityType::Hero;
     entity.low->pos = player_spawn_pos(state.world);
     entity.low->facing = Facing::Front;
     // Sized from the sprite: the body is 1.12 x 1.4 m, and the footprint is
@@ -117,6 +58,7 @@ static void init_player(GameState& state, u32 low_index) {
     entity.low->width = k_meters_per_pixel * k_hero_body_px.x;
     entity.low->height = k_meters_per_pixel * k_hero_body_px.y;
     entity.low->collision_dim = k_meters_per_pixel * k_hero_shadow_px;
+    entity.low->collides = true;
 
     // The first player to join gets the camera.
     if (state.camera_entity_index == 0) {
@@ -219,10 +161,10 @@ static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir,
     Vec2 new_vel = entity.high->vel + dt * accel;
 
     // Search in t: travel as much of the move as fits before the first
-    // wall. The entity collides as its collision_dim footprint, centered on
-    // its position (its feet).
+    // wall or other entity. The entity collides as its collision_dim
+    // footprint, centered on its position (its feet).
     const WorldPosition old_pos = entity.low->pos;
-    MoveResult move = try_move(state.world, entity.low->collision_dim, old_pos, delta);
+    MoveResult move = try_move(state, entity, old_pos, delta);
     if (move.blocked) {
         // Glide: drop the into-wall part of the velocity and of the rest
         // of this frame's move, keeping only the part along the wall,
@@ -238,7 +180,7 @@ static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir,
         new_vel = glide * (new_vel - dot(new_vel, n) * n);
         Vec2 rest = (1.0f - move.t) * delta;
         rest = glide * (rest - dot(rest, n) * n);
-        move = try_move(state.world, entity.low->collision_dim, move.new_pos, rest);
+        move = try_move(state, entity, move.new_pos, rest);
         if (move.blocked) {
             // A second wall (e.g. a corner): stop moving into it too.
             // Normals are axis-aligned, so this keeps the first removal.
@@ -326,11 +268,13 @@ extern "C" void game_render(
         init_player(*state, keyboard_player);
         state->player_index_for_controller[keyboard_controller] = keyboard_player;
 
+        // Before the first set_camera, so the walls around the start are
+        // promoted with the player.
+        generate_world(*state);
+
         // Start already framing the first room instead of easing in to it.
         state->camera_mode = CameraMode::Room;
         set_camera(*state, room_center(world, player_spawn_pos(world)));
-
-        generate_world(state->permanent_arena, world);
 
         storage.is_initialized = true;
     }
@@ -458,9 +402,12 @@ extern "C" void game_render(
             Color tile_color = {.r = 0.1f, .g = 0.1f, .b = 0.3f};
             u32 value = 0;
             bool is_player_tile = false;
-            for (u32 i = 1; i < state->low_entity_count; i++) {
-                const LowEntity& e = state->low_entities[i];
-                if (e.pos.abs_tile.x == tile_x && e.pos.abs_tile.y == tile_y && e.pos.abs_tile.z == camera.abs_tile.z) {
+            // Heroes only, and only high ones: they're on screen, and the high
+            // list is short, where every low entity includes thousands of walls.
+            for (u32 i = 1; i < state->high_entity_count; i++) {
+                const LowEntity& e = state->low_entities[state->high_entities[i].low_index];
+                if (e.type == EntityType::Hero && e.pos.abs_tile.x == tile_x && e.pos.abs_tile.y == tile_y
+                    && e.pos.abs_tile.z == camera.abs_tile.z) {
                     is_player_tile = true;
                     break;
                 }
@@ -518,21 +465,36 @@ extern "C" void game_render(
         const LowEntity& entity = state->low_entities[high.low_index];
 
         const Vec2 ground_pos = screen_center + hadamard(world_to_screen, high.pos);
-        const LoadedBitmap& hero = state->hero[static_cast<u32>(entity.facing)];
-        if (hero.pixels) {
-            // pos is the feet, which are also the shadow's (and footprint's) center.
-            draw_bitmap(buffer, hero, ground_pos - k_hero_feet_px);
-        } else {
-            const Vec2 dim = {.x = entity.width, .y = entity.height};
-            const Vec2 origin = ground_pos - m2p * Vec2{0.5f * entity.width, entity.height};
-            constexpr Color player_color = {.r = 1.0f, .g = 1.0f, .b = 0.0f};
-            render_rect(buffer, origin, origin + m2p * dim, player_color);
+        switch (entity.type) {
+        case EntityType::Hero: {
+            const LoadedBitmap& hero = state->hero[static_cast<u32>(entity.facing)];
+            if (hero.pixels) {
+                // pos is the feet, which are also the shadow's (and footprint's) center.
+                draw_bitmap(buffer, hero, ground_pos - k_hero_feet_px);
+            } else {
+                const Vec2 dim = {.x = entity.width, .y = entity.height};
+                const Vec2 origin = ground_pos - m2p * Vec2{0.5f * entity.width, entity.height};
+                constexpr Color player_color = {.r = 1.0f, .g = 1.0f, .b = 0.0f};
+                render_rect(buffer, origin, origin + m2p * dim, player_color);
+            }
+            break;
+        }
+        case EntityType::Wall: {
+            // Its footprint, filled, in the white wall tiles use. Not a light
+            // gray: that's too close to the 0.75 gray of the tile a hero is on.
+            const Vec2 half_dim = 0.5f * m2p * entity.collision_dim;
+            render_rect(buffer, ground_pos - half_dim, ground_pos + half_dim, gray_value(1.0f));
+            break;
+        }
+        case EntityType::None:
+            break;
         }
 
         // Debug: the footprint try_move collides with, centered on pos. Drawn
         // on top so it stays visible; it's symmetric, so the y flip doesn't
-        // change which corner is min.
-        if (k_dev_mode) {
+        // change which corner is min. Not for walls: their fill already is
+        // their footprint, which this would cover completely.
+        if (k_dev_mode && entity.type != EntityType::Wall) {
             Vec2 half_collision = 0.5f * m2p * entity.collision_dim;
             constexpr Color collision_color = {.r = 1.0f, .g = 0.0f, .b = 1.0f};
             render_rect(buffer, ground_pos - half_collision, ground_pos + half_collision, collision_color);
@@ -553,9 +515,17 @@ extern "C" void game_render(
 // chosen right after arriving by stairs.
 //
 // world.chunk_hash starts empty: storage.main comes zeroed from the
-// platform. Chunks are created as the screens write into them, and new
-// chunks start out as all wall, so everything outside the screens is wall.
-static void generate_world(Arena& arena, World& world) {
+// platform. Chunks are created as the screens write into them; tiles in a
+// new chunk start out as wall.
+//
+// Walls block as entities: each wall tile also gets a wall entity (add_wall)
+// of the same shape, and only entities collide. The wall tiles are still
+// written for drawing, and the tile map still holds the stairs. Outside the
+// screens there are no entities, so nothing there blocks; that's fine because
+// every screen is walled in, with doors only between screens on the path.
+static void generate_world(GameState& state) {
+    Arena& arena = state.permanent_arena;
+    World& world = state.world;
     constexpr u32 screen_count = 100;
     constexpr u32 door_col = k_screen_tile_cols / 2;
     constexpr u32 door_row = k_screen_tile_rows / 2;
@@ -583,6 +553,15 @@ static void generate_world(Arena& arena, World& world) {
             take_stairs = true;
             break;
         }
+        // The last screen has no exit: past it is ungenerated space, which
+        // has no wall entities, so an open door or stairs there would lead
+        // into the void. (The choice is still drawn, so earlier screens come
+        // out the same.)
+        if (screen == screen_count - 1) {
+            door_right = false;
+            door_top = false;
+            take_stairs = false;
+        }
         const u32 departure_stairs = screen_z == 0 ? k_tile_stairs_up : k_tile_stairs_down;
 
         for (u32 row = 0; row < k_screen_tile_rows; row++) {
@@ -602,14 +581,12 @@ static void generate_world(Arena& arena, World& world) {
                         value = arrival_stairs;
                     }
                 }
-                set_tile_value(
-                    arena,
-                    world,
-                    screen_x * k_screen_tile_cols + col,
-                    screen_y * k_screen_tile_rows + row,
-                    screen_z,
-                    value
-                );
+                const u32 abs_tile_x = screen_x * k_screen_tile_cols + col;
+                const u32 abs_tile_y = screen_y * k_screen_tile_rows + row;
+                set_tile_value(arena, world, abs_tile_x, abs_tile_y, screen_z, value);
+                if (value == k_tile_wall) {
+                    add_wall(state, abs_tile_x, abs_tile_y, screen_z);
+                }
             }
         }
 
