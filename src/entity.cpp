@@ -92,11 +92,11 @@ static Entity add_tile_entity(GameState& state, EntityType type, u32 abs_tile_x,
     low.type = type;
     low.pos = {
         .abs_tile = {.x = abs_tile_x, .y = abs_tile_y, .z = abs_tile_z},
-        .tile_rel = {0.5f * side, 0.5f * side},
+        .tile_rel = tile_center(state.world),
     };
     low.width = side;
     low.height = side;
-    low.collision_dim = {side, side};
+    low.collision_dim = Vec2::all(side);
     return entity;
 }
 

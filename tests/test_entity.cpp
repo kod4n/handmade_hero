@@ -97,7 +97,7 @@ TEST(try_move_stops_at_first_wall) {
     const f32 mid = 0.5f * side;
 
     // Open floor: not blocked, the whole move is taken.
-    const WorldPosition center = {.abs_tile = {.x = 11, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
+    const WorldPosition center = {.abs_tile = {.x = 11, .y = 11, .z = 0}, .tile_rel = Vec2::all(mid)};
     MoveResult clear = try_move(*state, point, center, {0.3f, -0.2f});
     CHECK(!clear.blocked);
     CHECK_EQ(clear.t, 1.0f);
@@ -150,7 +150,7 @@ TEST(try_move_does_not_tunnel_through_walls) {
     const f32 side = world->tile_side_in_meters;
     const f32 mid = 0.5f * side;
 
-    const WorldPosition start = {.abs_tile = {.x = 12, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
+    const WorldPosition start = {.abs_tile = {.x = 12, .y = 11, .z = 0}, .tile_rel = Vec2::all(mid)};
     MoveResult move = try_move(*state, point, start, {2.0f * side, 0.0f});
     CHECK(move.blocked);
     CHECK_NEAR(move.t, 0.25f, 1e-3f);
@@ -188,7 +188,7 @@ TEST(try_move_only_blocks_moving_into_a_face) {
 
     // Stuck inside a wall: the faces only block from outside, so it can
     // walk back out onto the floor.
-    const WorldPosition in_wall = {.abs_tile = {.x = 13, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
+    const WorldPosition in_wall = {.abs_tile = {.x = 13, .y = 11, .z = 0}, .tile_rel = Vec2::all(mid)};
     MoveResult out = try_move(*state, point, in_wall, {-side, 0.0f});
     CHECK(!out.blocked);
     CHECK_EQ(out.new_pos.abs_tile.x, 12);
@@ -201,13 +201,13 @@ TEST(try_move_keeps_entity_size_out_of_walls) {
     fill_walled_room(*state);
     const f32 side = world->tile_side_in_meters;
     const f32 mid = 0.5f * side;
-    const Entity mover = add_test_entity(*state, {}, {0.5f, 0.5f});
+    const Entity mover = add_test_entity(*state, {}, Vec2::all(0.5f));
     const f32 half = 0.25f;
 
     // From the room's center toward the right wall (the left face of tile
     // 13): the center stops half the width short of the face, not on it.
     // That's 2 * side - mid - half = 1.85 of the 2.0 move.
-    const WorldPosition center = {.abs_tile = {.x = 11, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
+    const WorldPosition center = {.abs_tile = {.x = 11, .y = 11, .z = 0}, .tile_rel = Vec2::all(mid)};
     MoveResult right = try_move(*state, mover, center, {2.0f, 0.0f});
     CHECK(right.blocked);
     CHECK_NEAR(right.t, 0.925f, 1e-3f);
@@ -243,11 +243,11 @@ TEST(try_move_stops_at_entities) {
     // A 0.5 m entity in the middle of the room, and movers one tile to its
     // left heading right, past it toward the wall. Absolute x: obstacle
     // 16.1, start 14.7. The movers themselves sit at tile 0, far away.
-    const WorldPosition middle = {.abs_tile = {.x = 11, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
-    const WorldPosition start = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
-    const Entity obstacle = add_test_entity(*state, middle, {0.5f, 0.5f});
+    const WorldPosition middle = {.abs_tile = {.x = 11, .y = 11, .z = 0}, .tile_rel = Vec2::all(mid)};
+    const WorldPosition start = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = Vec2::all(mid)};
+    const Entity obstacle = add_test_entity(*state, middle, Vec2::all(0.5f));
     const Entity point = add_test_entity(*state, {}, k_point_dim);
-    const Entity mover = add_test_entity(*state, {}, {0.5f, 0.5f});
+    const Entity mover = add_test_entity(*state, {}, Vec2::all(0.5f));
 
     // A point stops half the obstacle's width short of its center: at
     // 15.85, 1.15 of the 2.0 move. It's hit before the wall behind it.
@@ -310,14 +310,14 @@ TEST(add_wall_blocks_like_a_wall_tile) {
     CHECK(wall.low->type == EntityType::Wall);
     CHECK(wall.low->collides);
     CHECK_EQ(wall.low->pos.abs_tile.x, 12);
-    CHECK_EQ(wall.low->pos.tile_rel, (Vec2{mid, mid}));
-    CHECK_EQ(wall.low->collision_dim, (Vec2{side, side}));
+    CHECK_EQ(wall.low->pos.tile_rel, Vec2::all(mid));
+    CHECK_EQ(wall.low->collision_dim, Vec2::all(side));
     make_entity_high(*state, wall.low_index);
 
     // From the middle of tile 10 (x 14.7) toward the wall entity's left face
     // at 16.8, 2.1 of the 3.0 move, before the wall tiles at 18.2.
     const Entity point = add_test_entity(*state, {}, k_point_dim);
-    const WorldPosition start = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = {mid, mid}};
+    const WorldPosition start = {.abs_tile = {.x = 10, .y = 11, .z = 0}, .tile_rel = Vec2::all(mid)};
     MoveResult move = try_move(*state, point, start, {3.0f, 0.0f});
     CHECK(move.blocked);
     CHECK_NEAR(move.t, 0.7f, 1e-3f);

@@ -144,4 +144,10 @@ Vec2 world_pos_diff(const World& world, const WorldPosition& a, const WorldPosit
     return world.tile_side_in_meters * d_tiles + (a.tile_rel - b.tile_rel);
 }
 
+// The tile_rel of a tile's center. tile_rel is measured from the tile's
+// bottom-left corner, so this is half a tile in from it on both axes.
+Vec2 tile_center(const World& world) {
+    return Vec2::all(0.5f * world.tile_side_in_meters);
+}
+
 }  // namespace hh

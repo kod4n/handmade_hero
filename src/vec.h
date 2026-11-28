@@ -18,6 +18,10 @@ template <typename T>
 struct TVec2 {
     T x;
     T y;
+    // Every component set to v, e.g. Vec2::all(side) for a square.
+    static constexpr TVec2 all(T v) {
+        return {v, v};
+    }
     constexpr bool operator==(const TVec2&) const = default;
 };
 template <typename T>
@@ -91,6 +95,10 @@ struct TVec3 {
     T x;
     T y;
     T z;
+    // Every component set to v.
+    static constexpr TVec3 all(T v) {
+        return {v, v, v};
+    }
     constexpr bool operator==(const TVec3&) const = default;
 };
 template <typename T>
@@ -169,6 +177,10 @@ struct TVec4 {
     T y;
     T z;
     T w;
+    // Every component set to v.
+    static constexpr TVec4 all(T v) {
+        return {v, v, v, v};
+    }
     constexpr bool operator==(const TVec4&) const = default;
 };
 template <typename T>

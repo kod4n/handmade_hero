@@ -39,8 +39,10 @@ inline constexpr f32 k_meters_per_pixel = k_tile_side_in_meters / k_tile_side_in
 
 // Where new players appear: the middle of tile (1, 3) in the first room.
 static WorldPosition player_spawn_pos(const World& world) {
-    const WorldPosition tile = {.abs_tile = {.x = 8, .y = 4, .z = 0}, .tile_rel = {}};
-    return world_pos_offset(world, tile, 0.5f * Vec2{world.tile_side_in_meters, world.tile_side_in_meters});
+    return {
+        .abs_tile = {.x = 8, .y = 4, .z = 0},
+        .tile_rel = tile_center(world),
+    };
 }
 
 // Sets up the low entity add_entity handed out as a player. 0 (add_entity
@@ -66,14 +68,18 @@ static void init_player(GameState& state, u32 low_index) {
     }
 }
 
-// Whether a point rel (meters from the camera) is in the area whose entities
-// are kept high: a room plus a margin, so the player isn't demoted while the
+// Half the size, in meters, of the area around the camera whose entities are
+// kept high: a room plus a margin, so the player isn't demoted while the
 // camera lags behind it in a doorway or in Follow mode.
-static bool in_camera_area(const World& world, Vec2 rel) {
+static Vec2 camera_area_half_size(const World& world) {
     constexpr f32 tile_margin = 2.0f;
     const Vec2 tile_area = {k_screen_tile_cols + 2.0f * tile_margin, k_screen_tile_rows + 2.0f * tile_margin};
-    const Vec2 half_size = 0.5f * world.tile_side_in_meters * tile_area;
+    return 0.5f * world.tile_side_in_meters * tile_area;
+}
 
+// Whether a point rel (meters from the camera) is in that area.
+static bool in_camera_area(const World& world, Vec2 rel) {
+    const Vec2 half_size = camera_area_half_size(world);
     return fabsf(rel.x) <= half_size.x && fabsf(rel.y) <= half_size.y;
 }
 
@@ -360,16 +366,16 @@ extern "C" void game_render(
         set_camera(*state, new_camera);
     }
 
-    // clear
-    render_rect(buffer, {}, buffer.size_vec(), gray_value(0.0f));
-    // Screen-space backdrop; empty tiles below are left undrawn so it shows.
-    // Bitmaps are only loaded in DEV builds; elsewhere pixels is null and
-    // the draw is a no-op.
-    draw_bitmap(buffer, state->background, Vec2{});
-    const bool has_background = state->background.pixels != nullptr;
+    // The floor: the screen-space backdrop, or plain gray where there's
+    // none (bitmaps are only loaded in DEV builds). Everything on it, walls
+    // and stairs included, is an entity, drawn below.
+    if (state->background.pixels) {
+        draw_bitmap(buffer, state->background, Vec2{});
+    } else {
+        render_rect(buffer, {}, buffer.size_vec(), gray_value(0.5f));
+    }
 
     const WorldPosition& camera = state->camera_pos;
-    const f32 tile_side = world.tile_side_in_pixels * state->debug_zoom;
     const f32 m2p = world.meters_to_pixels * state->debug_zoom;
     // Meters to pixels per axis. y is negated: world y points up, but the
     // pixel buffer is top-down.
@@ -377,123 +383,149 @@ extern "C" void game_render(
     // The camera point lands here on screen.
     const Vec2 screen_center = 0.5f * buffer.size_vec();
 
-    // Enough tiles to cover the buffer outward from the center, plus one for
-    // the partial tiles at the edges.
-    const i32 half_cols = static_cast<i32>(ceilf(screen_center.x / tile_side)) + 1;
-    const i32 half_rows = static_cast<i32>(ceilf(screen_center.y / tile_side)) + 1;
-
-    for (i32 rel_row = -half_rows; rel_row <= half_rows; rel_row++) {
-        for (i32 rel_col = -half_cols; rel_col <= half_cols; rel_col++) {
-            // Going below tile 0 wraps to a chunk that doesn't exist.
-            const u32 tile_x = camera.abs_tile.x + static_cast<u32>(rel_col);
-            const u32 tile_y = camera.abs_tile.y + static_cast<u32>(rel_row);
-
-            // Debug colors: dark blue where no chunk exists, dark red for
-            // tiles in an allocated chunk that nothing wrote.
-            Color tile_color = {.r = 0.1f, .g = 0.1f, .b = 0.3f};
-            u32 value = 0;
-            bool is_player_tile = false;
-            // Heroes only, and only high ones: they're on screen, and the high
-            // list is short, where every low entity includes thousands of walls.
-            for (u32 i = 1; i < state->high_entity_count; i++) {
-                const LowEntity& e = state->low_entities[state->high_entities[i].low_index];
-                if (e.type == EntityType::Hero && e.pos.abs_tile.x == tile_x && e.pos.abs_tile.y == tile_y
-                    && e.pos.abs_tile.z == camera.abs_tile.z) {
-                    is_player_tile = true;
-                    break;
-                }
-            }
-            if (get_tile_value(world, tile_x, tile_y, camera.abs_tile.z, value)) {
-                if (value == k_tile_empty && has_background && !is_player_tile) {
-                    continue;
-                }
-                switch (value) {
-                case k_tile_empty:
-                    tile_color = gray_value(0.5f);
-                    break;
-                case k_tile_wall:
-                    tile_color = gray_value(1.0f);
-                    break;
-                case k_tile_stairs_up:
-                    tile_color = {.r = 0.3f, .g = 0.8f, .b = 0.3f};
-                    break;
-                case k_tile_stairs_down:
-                    tile_color = {.r = 0.2f, .g = 0.5f, .b = 0.8f};
-                    break;
-                default:
-                    tile_color = {.r = 0.4f, .g = 0.1f, .b = 0.1f};
-                    break;
-                }
-            }
-            if (is_player_tile) {
-                tile_color = gray_value(0.75f);
-            }
-
-            // Screen position of the bottom-left corner of tile (col, row)
-            // relative to the camera. World y points up but the pixel buffer
-            // is top-down. Both edges of every tile go through this, so
-            // neighbors share bit-identical edges: adding tile_side instead
-            // differs by float error (1.4 m isn't exact), and when that
-            // straddles a rounding boundary it leaves a 1px seam.
-            auto corner_on_screen = [&](i32 col, i32 row) {
-                const Vec2 corner_from_camera =
-                    world.tile_side_in_meters * Vec2{static_cast<f32>(col), static_cast<f32>(row)} - camera.tile_rel;
-                return screen_center + hadamard(world_to_screen, corner_from_camera);
-            };
-            const Vec2 bottom_left = corner_on_screen(rel_col, rel_row);
-            const Vec2 top_right = corner_on_screen(rel_col + 1, rel_row + 1);
-            const Vec2 tile_min = {bottom_left.x, top_right.y};
-            const Vec2 tile_max = {top_right.x, bottom_left.y};
-
-            render_rect(buffer, tile_min, tile_max, tile_color);
-        }
-    }
+    // Screen position of the bottom-left corner of the tile (col, row) tiles
+    // from the camera's. World y points up but the pixel buffer is top-down.
+    // Every tile-aligned edge goes through this, so neighbors share
+    // bit-identical edges: computing one from its own tile's center instead
+    // differs by float error (1.4 m isn't exact), and when that straddles a
+    // rounding boundary it leaves a 1px seam.
+    auto corner_on_screen = [&](i32 col, i32 row) {
+        const Vec2 corner_from_camera =
+            world.tile_side_in_meters * Vec2{static_cast<f32>(col), static_cast<f32>(row)} - camera.tile_rel;
+        return screen_center + hadamard(world_to_screen, corner_from_camera);
+    };
+    // Screen rect of tile (abs_tile_x, abs_tile_y), for entities that fill a
+    // tile exactly (walls, stairs). The u32 difference reinterpreted as i32
+    // is the signed distance, even across a wrap.
+    struct TileRect {
+        Vec2 min;
+        Vec2 max;
+    };
+    auto tile_rect_on_screen = [&](u32 abs_tile_x, u32 abs_tile_y) {
+        const i32 col = static_cast<i32>(abs_tile_x - camera.abs_tile.x);
+        const i32 row = static_cast<i32>(abs_tile_y - camera.abs_tile.y);
+        const Vec2 bottom_left = corner_on_screen(col, row);
+        const Vec2 top_right = corner_on_screen(col + 1, row + 1);
+        return TileRect{.min = {bottom_left.x, top_right.y}, .max = {top_right.x, bottom_left.y}};
+    };
 
     // Only high entities are drawn: they're the ones near the camera, and
     // always on its level. Their pos is already relative to the camera.
-    for (u32 high_index = 1; high_index < state->high_entity_count; high_index++) {
-        const HighEntity& high = state->high_entities[high_index];
-        const LowEntity& entity = state->low_entities[high.low_index];
-
-        const Vec2 ground_pos = screen_center + hadamard(world_to_screen, high.pos);
-        switch (entity.type) {
-        case EntityType::Hero: {
-            const LoadedBitmap& hero = state->hero[static_cast<u32>(entity.facing)];
-            if (hero.pixels) {
-                // pos is the feet, which are also the shadow's (and footprint's) center.
-                draw_bitmap(buffer, hero, ground_pos - k_hero_feet_px);
-            } else {
-                const Vec2 dim = {.x = entity.width, .y = entity.height};
-                const Vec2 origin = ground_pos - m2p * Vec2{0.5f * entity.width, entity.height};
-                constexpr Color player_color = {.r = 1.0f, .g = 1.0f, .b = 0.0f};
-                render_rect(buffer, origin, origin + m2p * dim, player_color);
-            }
-            break;
-        }
-        case EntityType::Wall: {
-            // Its footprint, filled, in the white wall tiles use. Not a light
-            // gray: that's too close to the 0.75 gray of the tile a hero is on.
-            const Vec2 half_dim = 0.5f * m2p * entity.collision_dim;
-            render_rect(buffer, ground_pos - half_dim, ground_pos + half_dim, gray_value(1.0f));
-            break;
-        }
+    //
+    // In layers, back to front, so nothing on the ground covers a hero
+    // whatever order the high array is in: stairs, then walls, then heroes.
+    // (Once art has height, so heroes can be behind things, this becomes a
+    // sort by y.)
+    constexpr u32 layer_count = 3;
+    auto layer_of = [](EntityType type) -> u32 {
+        switch (type) {
         case EntityType::StairsUp:
         case EntityType::StairsDown:
-            // Still drawn by the tile loop. Drawing them here would put them
-            // over any hero earlier in the high list; that needs a draw order.
+            return 0;
+        case EntityType::Wall:
+            return 1;
+        case EntityType::Hero:
+            return 2;
         case EntityType::None:
             break;
         }
-
-        // Debug: the footprint try_move collides with, centered on pos. Drawn
-        // on top so it stays visible; it's symmetric, so the y flip doesn't
-        // change which corner is min. Not for walls: their fill already is
-        // their footprint, which this would cover completely.
-        if (k_dev_mode && entity.type == EntityType::Hero) {
-            Vec2 half_collision = 0.5f * m2p * entity.collision_dim;
-            constexpr Color collision_color = {.r = 1.0f, .g = 0.0f, .b = 1.0f};
-            render_rect(buffer, ground_pos - half_collision, ground_pos + half_collision, collision_color);
+        return layer_count;  // not drawn
+    };
+    // Walls white; stairs green going up, blue going down.
+    auto tile_entity_color = [](EntityType type) {
+        switch (type) {
+        case EntityType::StairsUp:
+            return Color{.r = 0.3f, .g = 0.8f, .b = 0.3f};
+        case EntityType::StairsDown:
+            return Color{.r = 0.2f, .g = 0.5f, .b = 0.8f};
+        case EntityType::Wall:
+        case EntityType::Hero:
+        case EntityType::None:
+            break;
         }
+        return gray_value(1.0f);
+    };
+
+    // Zoomed out, the screen shows more than the camera area, where nothing
+    // is high. Draw the low walls and stairs on this level there too, dimmed,
+    // so the map stays visible and it's clear what isn't being simulated.
+    // That's every low entity, so only on zoomed-out (debug) frames.
+    const bool zoomed_out = state->debug_zoom < 1.0f;
+    if (zoomed_out) {
+        for (u32 low_index = 1; low_index < state->low_entity_count; low_index++) {
+            const LowEntity& entity = state->low_entities[low_index];
+            const bool tile_entity = entity.type == EntityType::Wall || entity.type == EntityType::StairsUp
+                                     || entity.type == EntityType::StairsDown;
+            if (!tile_entity || entity.high_index != 0 || entity.pos.abs_tile.z != camera.abs_tile.z) {
+                continue;
+            }
+            const TileRect rect = tile_rect_on_screen(entity.pos.abs_tile.x, entity.pos.abs_tile.y);
+            const Color c = tile_entity_color(entity.type);
+            constexpr f32 dim = 0.45f;
+            render_rect(buffer, rect.min, rect.max, Color{.r = dim * c.r, .g = dim * c.g, .b = dim * c.b});
+        }
+    }
+
+    for (u32 layer = 0; layer < layer_count; layer++) {
+        for (u32 high_index = 1; high_index < state->high_entity_count; high_index++) {
+            const HighEntity& high = state->high_entities[high_index];
+            const LowEntity& entity = state->low_entities[high.low_index];
+            if (layer_of(entity.type) != layer) {
+                continue;
+            }
+
+            const Vec2 ground_pos = screen_center + hadamard(world_to_screen, high.pos);
+            switch (entity.type) {
+            case EntityType::Hero: {
+                const LoadedBitmap& hero = state->hero[static_cast<u32>(entity.facing)];
+                if (hero.pixels) {
+                    // pos is the feet, which are also the shadow's (and footprint's) center.
+                    draw_bitmap(buffer, hero, ground_pos - k_hero_feet_px);
+                } else {
+                    const Vec2 dim = {.x = entity.width, .y = entity.height};
+                    const Vec2 origin = ground_pos - m2p * Vec2{0.5f * entity.width, entity.height};
+                    constexpr Color player_color = {.r = 1.0f, .g = 1.0f, .b = 0.0f};
+                    render_rect(buffer, origin, origin + m2p * dim, player_color);
+                }
+
+                // Debug: the footprint try_move collides with, centered on
+                // pos, on top so it stays visible. It's symmetric, so the y
+                // flip doesn't change which corner is min.
+                if (k_dev_mode) {
+                    const Vec2 half_collision = 0.5f * m2p * entity.collision_dim;
+                    constexpr Color collision_color = {.r = 1.0f, .g = 0.0f, .b = 1.0f};
+                    render_rect(buffer, ground_pos - half_collision, ground_pos + half_collision, collision_color);
+                }
+                break;
+            }
+            // Walls and stairs fill their tile exactly (add_tile_entity), so
+            // they're drawn from its shared corners rather than from pos, or
+            // neighbors could leave 1px seams.
+            case EntityType::Wall:
+            case EntityType::StairsUp:
+            case EntityType::StairsDown: {
+                const TileRect rect = tile_rect_on_screen(entity.pos.abs_tile.x, entity.pos.abs_tile.y);
+                render_rect(buffer, rect.min, rect.max, tile_entity_color(entity.type));
+                break;
+            }
+            case EntityType::None:
+                break;
+            }
+        }
+    }
+
+    // Zoomed out: outline the camera area, the edge of what's simulated. It's
+    // centered on the camera, so on the screen center.
+    if (zoomed_out) {
+        const Vec2 half = m2p * camera_area_half_size(world);
+        const Vec2 area_min = screen_center - half;
+        const Vec2 area_max = screen_center + half;
+        constexpr f32 thickness = 2.0f;  // pixels
+        constexpr Color outline_color = {.r = 1.0f, .g = 0.8f, .b = 0.0f};
+        render_rect(buffer, area_min, {area_max.x, area_min.y + thickness}, outline_color);
+        render_rect(buffer, {area_min.x, area_max.y - thickness}, area_max, outline_color);
+        render_rect(buffer, area_min, {area_min.x + thickness, area_max.y}, outline_color);
+        render_rect(buffer, {area_max.x - thickness, area_min.y}, area_max, outline_color);
     }
 }
 
@@ -509,18 +541,12 @@ extern "C" void game_render(
 // would lead back onto the screen just generated, so stairs are never
 // chosen right after arriving by stairs.
 //
-// world.chunk_hash starts empty: storage.main comes zeroed from the
-// platform. Chunks are created as the screens write into them; tiles in a
-// new chunk start out as wall.
-//
-// Walls and stairs are entities: each wall or stairs tile also gets an entity
-// of the same shape (add_wall, add_stairs), and only entities collide or
-// change levels. The tiles are still written, but only for drawing. Outside the
+// Everything it makes is an entity, one per tile: walls (add_wall) and
+// stairs (add_stairs). Nothing is written to the tile map. Outside the
 // screens there are no entities, so nothing there blocks; that's fine because
-// every screen is walled in, with doors only between screens on the path.
+// every screen is walled in, with doors only between screens on the path,
+// and the last screen has no exit.
 static void generate_world(GameState& state) {
-    Arena& arena = state.permanent_arena;
-    World& world = state.world;
     constexpr u32 screen_count = 100;
     constexpr u32 door_col = k_screen_tile_cols / 2;
     constexpr u32 door_row = k_screen_tile_rows / 2;
@@ -532,12 +558,12 @@ static void generate_world(GameState& state) {
     u32 screen_z = 0;
     bool door_left = false;
     bool door_bottom = false;
-    u32 arrival_stairs = k_tile_empty;  // stairs this screen was entered by, if any
+    EntityType arrival_stairs = EntityType::None;  // stairs this screen was entered by, if any
     for (u32 screen = 0; screen < screen_count; screen++) {
         bool door_right = false;
         bool door_top = false;
         bool take_stairs = false;
-        switch (random_choice(series, arrival_stairs == k_tile_empty ? 3 : 2)) {
+        switch (random_choice(series, arrival_stairs == EntityType::None ? 3 : 2)) {
         case 0:
             door_right = true;
             break;
@@ -557,7 +583,7 @@ static void generate_world(GameState& state) {
             door_top = false;
             take_stairs = false;
         }
-        const u32 departure_stairs = screen_z == 0 ? k_tile_stairs_up : k_tile_stairs_down;
+        const EntityType departure_stairs = screen_z == 0 ? EntityType::StairsUp : EntityType::StairsDown;
 
         for (u32 row = 0; row < k_screen_tile_rows; row++) {
             for (u32 col = 0; col < k_screen_tile_cols; col++) {
@@ -568,35 +594,31 @@ static void generate_world(GameState& state) {
                 if ((row == 0 && door_bottom) || (row == k_screen_tile_rows - 1 && door_top)) {
                     wall = wall && col != door_col;
                 }
-                u32 value = wall ? k_tile_wall : k_tile_empty;
+                // The stairs spot is inside the room, so never a wall.
+                EntityType stairs = EntityType::None;
                 if (col == stairs_col && row == stairs_row) {
-                    if (take_stairs) {
-                        value = departure_stairs;
-                    } else if (arrival_stairs != k_tile_empty) {
-                        value = arrival_stairs;
-                    }
+                    stairs = take_stairs ? departure_stairs : arrival_stairs;
                 }
                 const u32 abs_tile_x = screen_x * k_screen_tile_cols + col;
                 const u32 abs_tile_y = screen_y * k_screen_tile_rows + row;
-                set_tile_value(arena, world, abs_tile_x, abs_tile_y, screen_z, value);
-                if (value == k_tile_wall) {
+                if (stairs != EntityType::None) {
+                    add_stairs(state, stairs == EntityType::StairsUp, abs_tile_x, abs_tile_y, screen_z);
+                } else if (wall) {
                     add_wall(state, abs_tile_x, abs_tile_y, screen_z);
-                } else if (value == k_tile_stairs_up || value == k_tile_stairs_down) {
-                    add_stairs(state, value == k_tile_stairs_up, abs_tile_x, abs_tile_y, screen_z);
                 }
             }
         }
 
         door_left = door_right;
         door_bottom = door_top;
-        arrival_stairs = k_tile_empty;
+        arrival_stairs = EntityType::None;
         if (door_right) {
             screen_x++;
         } else if (door_top) {
             screen_y++;
         } else {
             // The other level's screen has stairs leading back here.
-            arrival_stairs = departure_stairs == k_tile_stairs_up ? k_tile_stairs_down : k_tile_stairs_up;
+            arrival_stairs = departure_stairs == EntityType::StairsUp ? EntityType::StairsDown : EntityType::StairsUp;
             screen_z = 1 - screen_z;
         }
     }

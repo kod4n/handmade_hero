@@ -28,6 +28,10 @@ static_assert(eq(hadamard(Vec2{2, 3}, Vec2{5, 1}), hadamard(Vec2{5, 1}, Vec2{2, 
 static_assert(length_sq(Vec2{3, 4}) == 25.0f);
 static_assert(length_sq(Vec2{-3, 4}) == 25.0f);
 static_assert(length_sq(Vec2{}) == 0.0f);
+static_assert(eq(Vec2::all(1.5f), {1.5f, 1.5f}));
+static_assert(eq(Vec3::all(-2.0f), {-2.0f, -2.0f, -2.0f}));
+static_assert(eq(Vec4::all(0.0f), Vec4{}));
+static_assert(Vec2u::all(7u) == Vec2u{7u, 7u});
 static_assert([] {
     Vec2 v{1, 2};
     v += Vec2{1, 1};
