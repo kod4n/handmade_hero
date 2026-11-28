@@ -30,14 +30,22 @@ struct LowEntity {
     f32 width;           // meters, of the drawn body
     f32 height;          // meters, of the drawn body
     Facing facing;       // last direction moved in; kept while idle
-    Vec2 collision_dim;  // vector used for entity collision detection
-    u32 high_index;      // ref to high entity
+    Vec2 collision_dim;  // meters; ground footprint centered on pos, what collides with walls
+    u32 high_index;      // ref to high entity, zero means not high freq
 };
 
 struct HighEntity {
-    Vec2 pos;
-    Vec2 vel;
-    u32 low_index;
+    Vec2 pos;       // meters from camera pos
+    Vec2 vel;       // m/s
+    u32 low_index;  // ref to low entity
+};
+
+// A view of one entity, built on demand. Never keep one across make_entity_low
+// or set_camera: they can move another entity into `high`'s slot.
+struct Entity {
+    u32 low_index;     // reference to low entity
+    LowEntity* low;    // low entity ptr, null means not found or out of bounds index
+    HighEntity* high;  // high entity ptr, null if not high (or low is null)
 };
 
 inline constexpr u32 k_max_entities = 256;
@@ -54,9 +62,9 @@ struct GameState {
     u32 camera_entity_index;                             // who the camera tracks, low entity index
     u32 player_index_for_controller[k_max_controllers];  // set when Start joins, low entity indexes
     LowEntity low_entities[k_max_entities];
-    u32 low_entity_count;
+    u32 low_entity_count;   // slots handed out, counting the reserved 0
     HighEntity high_entities[k_max_high_entities];
-    u32 high_entity_count;
+    u32 high_entity_count;  // slots in use, counting the reserved 0
     World world;
     LoadedBitmap background;
     LoadedBitmap hero[static_cast<u32>(Facing::Count)];

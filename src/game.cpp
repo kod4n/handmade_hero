@@ -39,6 +39,18 @@ static u32 add_entity(GameState& state) {
     return index;
 }
 
+static Entity get_entity(GameState& state, u32 low_index) {
+    Entity entity = {};
+    if (low_index > 0 && low_index < state.low_entity_count) {
+        entity.low_index = low_index;
+        entity.low = &state.low_entities[low_index];
+        if (u32 high_index = entity.low->high_index) {
+            entity.high = &state.high_entities[high_index];
+        }
+    }
+    return entity;
+}
+
 // Gives a low entity a high slot, placed relative to the current camera.
 // Does nothing if it's already high or every high slot is taken. HighEntity
 // has no z, so the caller checks the entity is on the camera's level.
@@ -94,17 +106,17 @@ static WorldPosition player_spawn_pos(const World& world) {
 // Sets up the low entity add_entity handed out as a player. 0 (add_entity
 // was full) is ignored. It becomes high on the next set_camera.
 static void init_player(GameState& state, u32 low_index) {
-    if (low_index == 0 || low_index >= state.low_entity_count) {
+    Entity entity = get_entity(state, low_index);
+    if (!entity.low) {
         return;
     }
-    LowEntity& low = state.low_entities[low_index];
-    low.pos = player_spawn_pos(state.world);
-    low.facing = Facing::Front;
+    entity.low->pos = player_spawn_pos(state.world);
+    entity.low->facing = Facing::Front;
     // Sized from the sprite: the body is 1.12 x 1.4 m, and the footprint is
     // its shadow, so walls stop the hero where the shadow meets them.
-    low.width = k_meters_per_pixel * k_hero_body_px.x;
-    low.height = k_meters_per_pixel * k_hero_body_px.y;
-    low.collision_dim = k_meters_per_pixel * k_hero_shadow_px;
+    entity.low->width = k_meters_per_pixel * k_hero_body_px.x;
+    entity.low->height = k_meters_per_pixel * k_hero_body_px.y;
+    entity.low->collision_dim = k_meters_per_pixel * k_hero_shadow_px;
 
     // The first player to join gets the camera.
     if (state.camera_entity_index == 0) {
@@ -160,11 +172,10 @@ static void set_camera(GameState& state, const WorldPosition& new_pos) {
 // Moves an entity for one frame. input_dir is the stick or keys (capped to length 1 here)
 // speed is the top speed it leads to, in m/s.
 static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir, f32 speed) {
-    LowEntity& low_entity = state.low_entities[low_index];
-    if (!low_entity.high_index) {
+    Entity entity = get_entity(state, low_index);
+    if (!entity.high) {
         return;  // only high entities should be simulated, exit early
     }
-    HighEntity& high_entity = state.high_entities[low_entity.high_index];
 
     // Face the dominant axis of the input; with no input, keep the last
     // facing. On an exact tie (a keyboard diagonal), keep the current
@@ -175,11 +186,11 @@ static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir,
         const f32 ax = fabsf(input_dir.x);
         const f32 ay = fabsf(input_dir.y);
         if (ax > ay) {
-            low_entity.facing = horizontal;
+            entity.low->facing = horizontal;
         } else if (ay > ax) {
-            low_entity.facing = vertical;
-        } else if (low_entity.facing != horizontal && low_entity.facing != vertical) {
-            low_entity.facing = horizontal;
+            entity.low->facing = vertical;
+        } else if (entity.low->facing != horizontal && entity.low->facing != vertical) {
+            entity.low->facing = horizontal;
         }
     }
 
@@ -199,19 +210,19 @@ static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir,
     // top speed and stops sooner (time constant 1 / drag, ~0.125 s here).
     constexpr f32 drag = 8.0f;  // 1/s
     accel *= speed * drag;
-    accel -= drag * high_entity.vel;
+    accel -= drag * entity.high->vel;
 
     // Constant-acceleration motion over the frame:
     //   p' = (0.5 * a * t^2) + (v * t) + p
     //   v' = v + (a * t)
-    Vec2 delta = 0.5f * accel * square(dt) + high_entity.vel * dt;
-    Vec2 new_vel = high_entity.vel + dt * accel;
+    Vec2 delta = 0.5f * accel * square(dt) + entity.high->vel * dt;
+    Vec2 new_vel = entity.high->vel + dt * accel;
 
     // Search in t: travel as much of the move as fits before the first
     // wall. The entity collides as its collision_dim footprint, centered on
     // its position (its feet).
-    const WorldPosition old_pos = low_entity.pos;
-    MoveResult move = try_move(state.world, low_entity.collision_dim, old_pos, delta);
+    const WorldPosition old_pos = entity.low->pos;
+    MoveResult move = try_move(state.world, entity.low->collision_dim, old_pos, delta);
     if (move.blocked) {
         // Glide: drop the into-wall part of the velocity and of the rest
         // of this frame's move, keeping only the part along the wall,
@@ -227,7 +238,7 @@ static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir,
         new_vel = glide * (new_vel - dot(new_vel, n) * n);
         Vec2 rest = (1.0f - move.t) * delta;
         rest = glide * (rest - dot(rest, n) * n);
-        move = try_move(state.world, low_entity.collision_dim, move.new_pos, rest);
+        move = try_move(state.world, entity.low->collision_dim, move.new_pos, rest);
         if (move.blocked) {
             // A second wall (e.g. a corner): stop moving into it too.
             // Normals are axis-aligned, so this keeps the first removal.
@@ -235,11 +246,11 @@ static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir,
             new_vel -= dot(new_vel, n2) * n2;
         }
     }
-    high_entity.vel = new_vel;
+    entity.high->vel = new_vel;
 
     const WorldPosition& new_pos = move.new_pos;
-    low_entity.pos = new_pos;
-    high_entity.pos = world_pos_diff(state.world, new_pos, state.camera_pos);
+    entity.low->pos = new_pos;
+    entity.high->pos = world_pos_diff(state.world, new_pos, state.camera_pos);
 
     // Stairs trigger only when stepping onto them. Arriving on the other
     // level puts the entity on the matching stairs, which doesn't count as
@@ -250,9 +261,9 @@ static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir,
         // No demote here: set_camera demotes it if the camera doesn't follow
         // it to the new level.
         if (value == k_tile_stairs_up) {
-            low_entity.pos.abs_tile.z++;
+            entity.low->pos.abs_tile.z++;
         } else if (value == k_tile_stairs_down) {
-            low_entity.pos.abs_tile.z--;
+            entity.low->pos.abs_tile.z--;
         }
     }
 }
@@ -396,11 +407,11 @@ extern "C" void game_render(
     //   x' = (x + (v + w x) dt) e^(-w dt)
     //   v' = (v - w (v + w x) dt) e^(-w dt)
     // where x is the camera's offset from the target.
-    if (state->camera_entity_index) {
-        const LowEntity& followed = state->low_entities[state->camera_entity_index];
+    const Entity camera_entity = get_entity(*state, state->camera_entity_index);
+    if (camera_entity.low) {
+        const LowEntity& low = *camera_entity.low;
         constexpr f32 camera_omega = 10.0f;  // 1/s, higher = tighter; settles in about 6.6 / omega s
-        const WorldPosition target =
-            state->camera_mode == CameraMode::Room ? room_center(world, followed.pos) : followed.pos;
+        const WorldPosition target = state->camera_mode == CameraMode::Room ? room_center(world, low.pos) : low.pos;
         const f32 dt = input.frame_dt;
         const Vec2 x = world_pos_diff(world, state->camera_pos, target);
         const Vec2 temp = dt * (state->camera_vel + camera_omega * x);
@@ -410,7 +421,7 @@ extern "C" void game_render(
         const Vec2 step = new_x - x;
 
         WorldPosition new_camera = world_pos_offset(world, state->camera_pos, step);
-        new_camera.abs_tile.z = followed.pos.abs_tile.z;
+        new_camera.abs_tile.z = low.pos.abs_tile.z;
         set_camera(*state, new_camera);
     }
 
