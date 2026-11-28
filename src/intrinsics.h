@@ -50,6 +50,13 @@ inline constexpr i32 sign(i32 value) {
     return (value > 0) - (value < 0);
 }
 
+// a / b rounded toward negative infinity (b > 0), where C++'s / truncates
+// toward zero: tile -1 is in room -1, not room 0.
+inline constexpr i32 floor_div(i32 a, i32 b) {
+    const i32 q = a / b;
+    return (a % b < 0) ? q - 1 : q;
+}
+
 inline f32 sin(f32 angle) {
     f32 res = sinf(angle);
     return res;

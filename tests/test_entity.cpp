@@ -74,8 +74,8 @@ TEST(entity_high_low_links_survive_swap_remove) {
 // A 3x3 floor at tiles (10..12, 10..12) on level 0, ringed by wall entities,
 // made high since tests skip set_camera.
 static void fill_walled_room(GameState& state) {
-    for (u32 y = 9; y <= 13; y++) {
-        for (u32 x = 9; x <= 13; x++) {
+    for (i32 y = 9; y <= 13; y++) {
+        for (i32 x = 9; x <= 13; x++) {
             if (x == 9 || x == 13 || y == 9 || y == 13) {
                 add_wall(state, x, y, 0);
                 make_entity_high(state, state.low_entity_count - 1);
@@ -342,7 +342,7 @@ TEST(stairs_trigger_on_stepping_onto_them) {
     CHECK(up.low->type == EntityType::StairsUp);
     CHECK(!up.low->collides);
 
-    auto at = [&](u32 tile_x, f32 rel_x) {
+    auto at = [&](i32 tile_x, f32 rel_x) {
         return WorldPosition{.abs_tile = {.x = tile_x, .y = 11, .z = 0}, .tile_rel = {rel_x, mid}};
     };
     // Onto them from the left: up a level. Onto the down stairs: down.

@@ -81,7 +81,7 @@ static void make_entity_low(GameState& state, u32 low_index) {
 // An entity of `type` filling tile (abs_tile_x, abs_tile_y, abs_tile_z):
 // centered on it and exactly its size. Returns it, or an empty handle if
 // out of low slots, which asserts (raise k_max_entities).
-static Entity add_tile_entity(GameState& state, EntityType type, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
+static Entity add_tile_entity(GameState& state, EntityType type, i32 abs_tile_x, i32 abs_tile_y, i32 abs_tile_z) {
     const Entity entity = get_entity(state, add_entity(state));
     assert(entity.low);
     if (!entity.low) {
@@ -101,7 +101,7 @@ static Entity add_tile_entity(GameState& state, EntityType type, u32 abs_tile_x,
 }
 
 // A wall filling its tile, colliding, so it blocks the same as a wall tile.
-static void add_wall(GameState& state, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
+static void add_wall(GameState& state, i32 abs_tile_x, i32 abs_tile_y, i32 abs_tile_z) {
     if (const Entity wall = add_tile_entity(state, EntityType::Wall, abs_tile_x, abs_tile_y, abs_tile_z); wall.low) {
         wall.low->collides = true;
     }
@@ -109,7 +109,7 @@ static void add_wall(GameState& state, u32 abs_tile_x, u32 abs_tile_y, u32 abs_t
 
 // Stairs filling their tile. They don't collide: they're walked onto, and
 // stairs_level_change notices.
-static void add_stairs(GameState& state, bool up, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
+static void add_stairs(GameState& state, bool up, i32 abs_tile_x, i32 abs_tile_y, i32 abs_tile_z) {
     add_tile_entity(state, up ? EntityType::StairsUp : EntityType::StairsDown, abs_tile_x, abs_tile_y, abs_tile_z);
 }
 
@@ -212,7 +212,7 @@ static void test_box(Vec2 rel, Vec2 delta, Vec2 min_corner, Vec2 max_corner, Mov
 MoveResult try_move(GameState& state, const Entity& mover, const WorldPosition& from, Vec2 delta) {
     const World& world = state.world;
     const Vec2 collision_dim = mover.low->collision_dim;
-    const u32 abs_tile_z = from.abs_tile.z;
+    const i32 abs_tile_z = from.abs_tile.z;
 
     MoveResult res = {.t = 1.0f};
 

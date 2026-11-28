@@ -16,8 +16,8 @@ static void generate_world(GameState& state);
 
 // Center of the room (one screen of tiles) that pos is in.
 static WorldPosition room_center(World& world, const WorldPosition& pos) {
-    const u32 room_x = pos.abs_tile.x / k_screen_tile_cols;
-    const u32 room_y = pos.abs_tile.y / k_screen_tile_rows;
+    const i32 room_x = floor_div(pos.abs_tile.x, k_screen_tile_cols);
+    const i32 room_y = floor_div(pos.abs_tile.y, k_screen_tile_rows);
     const WorldPosition room_corner = {
         .abs_tile = {.x = room_x * k_screen_tile_cols, .y = room_y * k_screen_tile_rows, .z = pos.abs_tile.z},
         .tile_rel = {},
@@ -204,7 +204,7 @@ static void move_player(GameState& state, u32 low_index, f32 dt, Vec2 input_dir,
     // stairs_level_change. No demote here: set_camera demotes it if the
     // camera doesn't follow it to the new level.
     const i32 dz = stairs_level_change(state, old_pos, new_pos);
-    entity.low->pos.abs_tile.z += static_cast<u32>(dz);
+    entity.low->pos.abs_tile.z += dz;
 }
 
 extern "C" void game_sound(AudioBuffer& audio, AudioState& state) {
@@ -395,15 +395,14 @@ extern "C" void game_render(
         return screen_center + hadamard(world_to_screen, corner_from_camera);
     };
     // Screen rect of tile (abs_tile_x, abs_tile_y), for entities that fill a
-    // tile exactly (walls, stairs). The u32 difference reinterpreted as i32
-    // is the signed distance, even across a wrap.
+    // tile exactly (walls, stairs).
     struct TileRect {
         Vec2 min;
         Vec2 max;
     };
-    auto tile_rect_on_screen = [&](u32 abs_tile_x, u32 abs_tile_y) {
-        const i32 col = static_cast<i32>(abs_tile_x - camera.abs_tile.x);
-        const i32 row = static_cast<i32>(abs_tile_y - camera.abs_tile.y);
+    auto tile_rect_on_screen = [&](i32 abs_tile_x, i32 abs_tile_y) {
+        const i32 col = abs_tile_x - camera.abs_tile.x;
+        const i32 row = abs_tile_y - camera.abs_tile.y;
         const Vec2 bottom_left = corner_on_screen(col, row);
         const Vec2 top_right = corner_on_screen(col + 1, row + 1);
         return TileRect{.min = {bottom_left.x, top_right.y}, .max = {top_right.x, bottom_left.y}};
@@ -539,8 +538,8 @@ extern "C" void game_render(
 // left or bottom edge, or the opposite stairs in the same spot. Row 0
 // is the bottom of a screen.
 //
-// The path only moves right or up: stepping left/down from screen 0
-// would wrap the u32 tile coordinates. Two level changes in a row
+// The path only moves right or up, starting from screen (0, 0) at the
+// origin, so it can't run back into itself. Two level changes in a row
 // would lead back onto the screen just generated, so stairs are never
 // chosen right after arriving by stairs.
 //
@@ -551,14 +550,14 @@ extern "C" void game_render(
 // and the last screen has no exit.
 static void generate_world(GameState& state) {
     constexpr u32 screen_count = 100;
-    constexpr u32 door_col = k_screen_tile_cols / 2;
-    constexpr u32 door_row = k_screen_tile_rows / 2;
-    constexpr u32 stairs_col = k_screen_tile_cols / 2 + 4;
-    constexpr u32 stairs_row = k_screen_tile_rows / 2 + 2;
+    constexpr i32 door_col = k_screen_tile_cols / 2;
+    constexpr i32 door_row = k_screen_tile_rows / 2;
+    constexpr i32 stairs_col = k_screen_tile_cols / 2 + 4;
+    constexpr i32 stairs_row = k_screen_tile_rows / 2 + 2;
     RandomSeries series = {};
-    u32 screen_x = 0;
-    u32 screen_y = 0;
-    u32 screen_z = 0;
+    i32 screen_x = 0;
+    i32 screen_y = 0;
+    i32 screen_z = 0;
     bool door_left = false;
     bool door_bottom = false;
     EntityType arrival_stairs = EntityType::None;  // stairs this screen was entered by, if any
@@ -588,8 +587,8 @@ static void generate_world(GameState& state) {
         }
         const EntityType departure_stairs = screen_z == 0 ? EntityType::StairsUp : EntityType::StairsDown;
 
-        for (u32 row = 0; row < k_screen_tile_rows; row++) {
-            for (u32 col = 0; col < k_screen_tile_cols; col++) {
+        for (i32 row = 0; row < k_screen_tile_rows; row++) {
+            for (i32 col = 0; col < k_screen_tile_cols; col++) {
                 bool wall = row == 0 || row == k_screen_tile_rows - 1 || col == 0 || col == k_screen_tile_cols - 1;
                 if ((col == 0 && door_left) || (col == k_screen_tile_cols - 1 && door_right)) {
                     wall = wall && row != door_row;
@@ -602,8 +601,8 @@ static void generate_world(GameState& state) {
                 if (col == stairs_col && row == stairs_row) {
                     stairs = take_stairs ? departure_stairs : arrival_stairs;
                 }
-                const u32 abs_tile_x = screen_x * k_screen_tile_cols + col;
-                const u32 abs_tile_y = screen_y * k_screen_tile_rows + row;
+                const i32 abs_tile_x = screen_x * k_screen_tile_cols + col;
+                const i32 abs_tile_y = screen_y * k_screen_tile_rows + row;
                 if (stairs != EntityType::None) {
                     add_stairs(state, stairs == EntityType::StairsUp, abs_tile_x, abs_tile_y, screen_z);
                 } else if (wall) {

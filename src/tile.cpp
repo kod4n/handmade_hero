@@ -10,21 +10,24 @@
 namespace hh {
 
 // Where an absolute tile coordinate lands: which chunk, and which tile in it.
+// Negative coordinates floor into the chunk below: >> on a signed value is
+// an arithmetic shift (defined since C++20), and masking the two's
+// complement bits gives the tile counted up from that chunk's corner.
 struct ChunkPosition {
-    u32 chunk_x;
-    u32 chunk_y;
-    u32 chunk_z;
+    i32 chunk_x;
+    i32 chunk_y;
+    i32 chunk_z;
     u32 tile_x;
     u32 tile_y;
 };
 
-ChunkPosition get_chunk_position(u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
+ChunkPosition get_chunk_position(i32 abs_tile_x, i32 abs_tile_y, i32 abs_tile_z) {
     ChunkPosition res = {
         .chunk_x = abs_tile_x >> k_chunk_shift,
         .chunk_y = abs_tile_y >> k_chunk_shift,
         .chunk_z = abs_tile_z,
-        .tile_x = abs_tile_x & k_chunk_mask,
-        .tile_y = abs_tile_y & k_chunk_mask,
+        .tile_x = static_cast<u32>(abs_tile_x) & k_chunk_mask,
+        .tile_y = static_cast<u32>(abs_tile_y) & k_chunk_mask,
     };
     return res;
 }
@@ -34,8 +37,9 @@ constexpr u32 k_default_tile_value = k_tile_uninitialized;
 
 // Finds the chunk at (chunk_x, chunk_y, chunk_z). If it doesn't exist yet,
 // creates it from `arena` when one is given, and returns null otherwise.
-TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y, u32 chunk_z, Arena* arena = nullptr) {
-    u32 hash = chunk_x * 19 + chunk_y * 7 + chunk_z * 3;
+TileChunk* get_tile_chunk(World& world, i32 chunk_x, i32 chunk_y, i32 chunk_z, Arena* arena = nullptr) {
+    // Hashed as u32 so the multiplies wrap instead of overflowing.
+    u32 hash = static_cast<u32>(chunk_x) * 19 + static_cast<u32>(chunk_y) * 7 + static_cast<u32>(chunk_z) * 3;
     TileChunk* chunk = &world.chunk_hash[hash & (k_chunk_hash_size - 1)];
 
     // Walk the chain. An unused head slot can be claimed directly; otherwise
@@ -71,7 +75,7 @@ TileChunk* get_tile_chunk(World& world, u32 chunk_x, u32 chunk_y, u32 chunk_z, A
 }
 
 // Returns false, leaving value untouched, when no chunk holds the tile.
-bool get_tile_value(World& world, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z, u32& value) {
+bool get_tile_value(World& world, i32 abs_tile_x, i32 abs_tile_y, i32 abs_tile_z, u32& value) {
     bool res = false;
 
     ChunkPosition pos = get_chunk_position(abs_tile_x, abs_tile_y, abs_tile_z);
@@ -85,7 +89,7 @@ bool get_tile_value(World& world, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z
 }
 
 // Creates the tile's chunk from `arena` if it doesn't exist yet.
-void set_tile_value(Arena& arena, World& world, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z, u32 value) {
+void set_tile_value(Arena& arena, World& world, i32 abs_tile_x, i32 abs_tile_y, i32 abs_tile_z, u32 value) {
     ChunkPosition pos = get_chunk_position(abs_tile_x, abs_tile_y, abs_tile_z);
     TileChunk* chunk = get_tile_chunk(world, pos.chunk_x, pos.chunk_y, pos.chunk_z, &arena);
     assert(chunk);
@@ -98,7 +102,7 @@ bool get_tile_value(World& world, const WorldPosition& pos, u32& value) {
 
 // Floor and stairs can be walked on; walls, unwritten tiles and missing
 // chunks can't.
-bool is_tile_walkable(World& world, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile_z) {
+bool is_tile_walkable(World& world, i32 abs_tile_x, i32 abs_tile_y, i32 abs_tile_z) {
     u32 value = 0;
     bool res = get_tile_value(world, abs_tile_x, abs_tile_y, abs_tile_z, value)
                && (value == k_tile_empty || value == k_tile_stairs_up || value == k_tile_stairs_down);
@@ -106,11 +110,11 @@ bool is_tile_walkable(World& world, u32 abs_tile_x, u32 abs_tile_y, u32 abs_tile
 }
 
 // Carries an out-of-range offset within a tile into the absolute tile
-// coordinate. Carrying into the next chunk falls out of the bit layout, and
-// stepping left/up from tile 0 wraps to a chunk that doesn't exist.
-static void recanonicalize_coord(f32 tile_side, u32& tile, f32& tile_rel) {
+// coordinate. Carrying into the next chunk falls out of the bit layout,
+// including below tile 0 into negative chunks.
+static void recanonicalize_coord(f32 tile_side, i32& tile, f32& tile_rel) {
     i32 carry = static_cast<i32>(floorf(tile_rel / tile_side));
-    tile += static_cast<u32>(carry);
+    tile += carry;
     tile_rel -= static_cast<f32>(carry) * tile_side;
     // A tiny negative tile_rel can round up to exactly tile_side above.
     if (tile_rel >= tile_side) {
@@ -135,11 +139,9 @@ bool is_world_pos_walkable(World& world, const WorldPosition& pos) {
 
 // a - b, in meters, within a level: z is ignored.
 Vec2 world_pos_diff(const World& world, const WorldPosition& a, const WorldPosition& b) {
-    // Subtracting as u32 and reinterpreting as i32 gives the signed distance
-    // even across a wrap.
     const Vec2 d_tiles = {
-        .x = static_cast<f32>(static_cast<i32>(a.abs_tile.x - b.abs_tile.x)),
-        .y = static_cast<f32>(static_cast<i32>(a.abs_tile.y - b.abs_tile.y)),
+        .x = static_cast<f32>(a.abs_tile.x - b.abs_tile.x),
+        .y = static_cast<f32>(a.abs_tile.y - b.abs_tile.y),
     };
     return world.tile_side_in_meters * d_tiles + (a.tile_rel - b.tile_rel);
 }

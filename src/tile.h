@@ -13,7 +13,8 @@ inline constexpr f32 k_tile_side_in_pixels = 60.0f;
 
 // Chunks are k_chunk_dim x k_chunk_dim tiles. An absolute tile coordinate
 // keeps the chunk index in its high bits and the tile within the chunk in
-// its low k_chunk_shift bits.
+// its low k_chunk_shift bits. Coordinates are signed, so the arithmetic shift
+// floors: tile -1 is tile 15 of chunk -1.
 inline constexpr u32 k_chunk_shift = 4;
 inline constexpr u32 k_chunk_dim = 1u << k_chunk_shift;
 inline constexpr u32 k_chunk_mask = k_chunk_dim - 1;
@@ -34,9 +35,9 @@ inline constexpr u32 k_tile_stairs_down = 4;    // stepping onto it moves to z -
 // z isn't chunked: every level has its own chunks, so chunk_z is the absolute
 // tile z.
 struct TileChunk {
-    u32 chunk_x;
-    u32 chunk_y;
-    u32 chunk_z;
+    i32 chunk_x;
+    i32 chunk_y;
+    i32 chunk_z;
     u32* tiles;       // k_chunk_dim * k_chunk_dim, row-major; null marks an unused slot
     TileChunk* next;  // next chunk whose coordinate hashes to the same slot
 };
@@ -57,11 +58,11 @@ struct World {
 //
 // A position in the world: an absolute tile coordinate (chunk in the high
 // bits, tile within the chunk in the low bits) and the offset within that
-// tile in meters. Moving past tile 0 wraps the u32 around to a chunk index
-// far from anything allocated, which reads as off-world. tile_rel is always in
+// tile in meters. Coordinates are signed with the origin in the middle, so
+// the world extends in every direction from (0, 0, 0). tile_rel is always in
 // range (0 <= tile_rel < tile side); move with world_pos_offset() so it stays that way.
 struct WorldPosition {
-    Vec3u abs_tile;  // z is the level; it changes only through stairs
+    Vec3i abs_tile;  // z is the level; it changes only through stairs
     Vec2 tile_rel;
 };
 

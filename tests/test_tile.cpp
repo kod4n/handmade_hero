@@ -37,9 +37,17 @@ TEST(chunk_position_splits_bits) {
     CHECK_EQ(first_in_next.chunk_y, 2);
     CHECK_EQ(first_in_next.tile_y, 1);
 
-    ChunkPosition top = get_chunk_position(0xFFFFFFFF, 0, 0);
-    CHECK_EQ(top.chunk_x, 0x0FFFFFFF);
-    CHECK_EQ(top.tile_x, 15);
+    // Negative tiles floor into the chunk below 0.
+    ChunkPosition minus_one = get_chunk_position(-1, -16, -2);
+    CHECK_EQ(minus_one.chunk_x, -1);
+    CHECK_EQ(minus_one.tile_x, 15);
+    CHECK_EQ(minus_one.chunk_y, -1);
+    CHECK_EQ(minus_one.tile_y, 0);
+    CHECK_EQ(minus_one.chunk_z, -2);
+
+    ChunkPosition minus_seventeen = get_chunk_position(-17, 0, 0);
+    CHECK_EQ(minus_seventeen.chunk_x, -2);
+    CHECK_EQ(minus_seventeen.tile_x, 15);
 }
 
 TEST(world_pos_offset_carries_into_neighbor_tiles) {
@@ -84,23 +92,42 @@ TEST(world_pos_offset_tiny_negative_stays_canonical) {
     CHECK_EQ(pos.tile_rel.x, 0.0f);
 }
 
-TEST(world_pos_offset_left_of_zero_wraps_off_world) {
+TEST(world_pos_offset_left_of_zero_goes_negative) {
     World* world = make_world();
     defer(std::free(world));
     Arena arena = make_test_arena();
     set_tile_value(arena, *world, 0, 0, 0, k_tile_empty);
 
     WorldPosition pos = world_pos_offset(*world, {.tile_rel = {0.5f, 0.5f}}, {-1.0f, 0.0f});
-    CHECK_EQ(pos.abs_tile.x, 0xFFFFFFFF);
+    CHECK_EQ(pos.abs_tile.x, -1);
     CHECK_NEAR(pos.tile_rel.x, 0.9f, 1e-5f);
+    // Nothing written there yet, so no chunk.
     CHECK(!is_world_pos_walkable(*world, pos));
+
+    // Once written, tile -1 is walkable like any other.
+    set_tile_value(arena, *world, -1, 0, 0, k_tile_empty);
+    CHECK(is_world_pos_walkable(*world, pos));
+}
+
+TEST(negative_tiles_get_their_own_chunks) {
+    World* world = make_world();
+    defer(std::free(world));
+    Arena arena = make_test_arena();
+    set_tile_value(arena, *world, -1, -1, 0, k_tile_wall);
+    set_tile_value(arena, *world, 15, 15, 0, k_tile_empty);  // same low bits, chunk 0
+
+    u32 value = 0;
+    CHECK(get_tile_value(*world, -1, -1, 0, value));
+    CHECK_EQ(value, k_tile_wall);
+    CHECK(get_tile_value(*world, 15, 15, 0, value));
+    CHECK_EQ(value, k_tile_empty);
 }
 
 TEST(random_walk_stays_canonical_and_tracks_distance) {
     World* world = make_world();
     defer(std::free(world));
 
-    // Starts at tile 0, so the walk crosses the u32 wrap in both directions.
+    // Starts at tile 0, so the walk crosses into negative tiles and back.
     const WorldPosition start = {.tile_rel = {0.1f, 1.3f}};
     WorldPosition pos = start;
     double total_dx = 0.0;
@@ -139,11 +166,11 @@ TEST(world_pos_diff_is_signed) {
     CHECK_NEAR(ba.x, -ab.x, 1e-5f);
     CHECK_NEAR(ba.y, -ab.y, 1e-5f);
 
-    // Across the wrap: tile 0xFFFFFFFF is one tile left of tile 0.
-    const WorldPosition wrapped = {.abs_tile = {.x = 0xFFFFFFFF}, .tile_rel = {0.5f, 0.0f}};
+    // Across the origin: tile -1 is one tile left of tile 0.
+    const WorldPosition minus_one = {.abs_tile = {.x = -1}, .tile_rel = {0.5f, 0.0f}};
     const WorldPosition one = {.abs_tile = {.x = 1}, .tile_rel = {0.5f, 0.0f}};
-    CHECK_NEAR(world_pos_diff(*world, wrapped, one).x, -2.0f * side, 1e-5f);
-    CHECK_NEAR(world_pos_diff(*world, one, wrapped).x, 2.0f * side, 1e-5f);
+    CHECK_NEAR(world_pos_diff(*world, minus_one, one).x, -2.0f * side, 1e-5f);
+    CHECK_NEAR(world_pos_diff(*world, one, minus_one).x, 2.0f * side, 1e-5f);
 
     // z is ignored.
     WorldPosition other_level = a;
